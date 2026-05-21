@@ -2,25 +2,38 @@ import tkinter as tk
 from tkinter import messagebox
 import random
 import re
+import time
 import kish
 
 
 FILES = "abcdefgh"
 
 
+class SearchTimeout(Exception):
+    pass
+
+
 class KishGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Turkish Dama - Kish Engine GUI")
-        self.root.geometry("720x760")
+        self.root.geometry("720x830")
         self.root.resizable(False, False)
 
         self.game = kish.Game()
         self.selected_square = None
-        self.legal_actions = []
 
         self.ai_busy = False
         self.ai_after_id = None
+
+        self.human_color = "White"
+        self.ai_color = "Black"
+        self.board_flipped = False
+
+        self.ai_max_depth = 8
+        self.ai_time_limit_ms = 1200
+        self.search_deadline = 0.0
+        self.tt = {}
 
         self.cell_size = 72
         self.board_size = self.cell_size * 8
@@ -38,21 +51,62 @@ class KishGUI:
         )
         self.status_label.pack(side="left", padx=15)
 
+        controls = tk.Frame(self.top_frame, bg="#1f1f1f")
+        controls.pack(side="right", padx=10)
+
+        self.depth_var = tk.IntVar(value=self.ai_max_depth)
+        tk.Label(controls, text="Depth", bg="#1f1f1f", fg="white").pack(side="left", padx=(0, 4))
+        self.depth_spin = tk.Spinbox(
+            controls,
+            from_=1,
+            to=20,
+            width=4,
+            textvariable=self.depth_var,
+            command=self.on_settings_changed
+        )
+        self.depth_spin.pack(side="left", padx=(0, 10))
+
+        self.time_var = tk.IntVar(value=self.ai_time_limit_ms)
+        tk.Label(controls, text="Time(ms)", bg="#1f1f1f", fg="white").pack(side="left", padx=(0, 4))
+        self.time_spin = tk.Spinbox(
+            controls,
+            from_=200,
+            to=10000,
+            increment=100,
+            width=6,
+            textvariable=self.time_var,
+            command=self.on_settings_changed
+        )
+        self.time_spin.pack(side="left", padx=(0, 10))
+
+        self.color_var = tk.StringVar(value="White")
+        tk.Label(controls, text="Play as", bg="#1f1f1f", fg="white").pack(side="left", padx=(0, 4))
+        self.color_menu = tk.OptionMenu(controls, self.color_var, "White", "Black", command=self.on_color_changed)
+        self.color_menu.pack(side="left", padx=(0, 10))
+
+        self.flip_btn = tk.Button(
+            controls,
+            text="Flip Board",
+            font=("Segoe UI", 10, "bold"),
+            command=self.toggle_board_flip
+        )
+        self.flip_btn.pack(side="left", padx=(0, 10))
+
         self.new_btn = tk.Button(
-            self.top_frame,
+            controls,
             text="New Game",
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", 10, "bold"),
             command=self.new_game
         )
-        self.new_btn.pack(side="right", padx=10)
+        self.new_btn.pack(side="left", padx=(0, 6))
 
         self.undo_btn = tk.Button(
-            self.top_frame,
+            controls,
             text="Undo",
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", 10, "bold"),
             command=self.undo
         )
-        self.undo_btn.pack(side="right", padx=10)
+        self.undo_btn.pack(side="left")
 
         self.canvas = tk.Canvas(
             root,
@@ -66,7 +120,7 @@ class KishGUI:
 
         self.info_label = tk.Label(
             root,
-            text="You play White. Click a piece, then click destination.",
+            text="",
             font=("Segoe UI", 11),
             fg="#ddd",
             bg="#2b2b2b",
@@ -76,14 +130,55 @@ class KishGUI:
 
         self.root.configure(bg="#2b2b2b")
 
+        self.update_info_label()
+        self.draw()
+        self.maybe_schedule_ai_move()
+
+    def update_info_label(self):
+        self.info_label.config(
+            text=f"You play {self.human_color}. Click a piece, then click destination."
+        )
+
+    def on_settings_changed(self):
+        try:
+            self.ai_max_depth = max(1, min(20, int(self.depth_var.get())))
+        except Exception:
+            self.ai_max_depth = 8
+            self.depth_var.set(self.ai_max_depth)
+
+        try:
+            self.ai_time_limit_ms = max(200, min(10000, int(self.time_var.get())))
+        except Exception:
+            self.ai_time_limit_ms = 1200
+            self.time_var.set(self.ai_time_limit_ms)
+
+        self.draw()
+
+    def on_color_changed(self, value):
+        self.human_color = str(value)
+        self.ai_color = "Black" if self.human_color == "White" else "White"
+        self.board_flipped = self.human_color == "Black"
+        self.new_game()
+
+    def toggle_board_flip(self):
+        self.board_flipped = not self.board_flipped
         self.draw()
 
     def new_game(self):
+        self.on_settings_changed()
         self.game = kish.Game()
         self.selected_square = None
+        self.tt.clear()
+        self.update_info_label()
         self.draw()
+        self.maybe_schedule_ai_move()
 
     def undo(self):
+        if self.ai_after_id is not None:
+            self.root.after_cancel(self.ai_after_id)
+            self.ai_after_id = None
+        self.ai_busy = False
+
         try:
             self.game.undo_move()
             self.game.undo_move()
@@ -97,30 +192,17 @@ class KishGUI:
         self.draw()
 
     def get_board_matrix(self):
-        """
-        Reads board from kish textual output.
-        Returns dict like:
-        {
-            "a1": ".",
-            "a2": "w",
-            ...
-        }
-        """
         text = str(self.game.board())
         board = {}
 
         for line in text.splitlines():
             line = line.strip()
-
-            # Example:
-            # 7  b b b b b b b b  7
             match = re.match(r"^([1-8])\s+(.+?)\s+\1$", line)
             if not match:
                 continue
 
             rank = int(match.group(1))
             pieces = match.group(2).split()
-
             if len(pieces) != 8:
                 continue
 
@@ -131,28 +213,14 @@ class KishGUI:
         return board
 
     def action_coords(self, action):
-        """
-        Converts action string like:
-        a3-a4
-        a3xa5
-        a3xc3xe3
-        into source and final destination.
-        """
         notation = str(action)
         coords = re.findall(r"[a-h][1-8]", notation.lower())
-
         if len(coords) < 2:
             return None, None
-
         return coords[0], coords[-1]
 
     def get_actions_from_square(self, square):
-        result = []
-        for action in self.game.actions():
-            src, dst = self.action_coords(action)
-            if src == square:
-                result.append(action)
-        return result
+        return [a for a in self.game.actions() if self.action_coords(a)[0] == square]
 
     def find_action(self, source, destination):
         for action in self.game.actions():
@@ -164,26 +232,41 @@ class KishGUI:
     def coord_to_square(self, x, y):
         col = x // self.cell_size
         row = y // self.cell_size
-
         if not (0 <= col < 8 and 0 <= row < 8):
             return None
 
-        file = FILES[col]
-        rank = 8 - row
+        if self.board_flipped:
+            board_col = 7 - col
+            board_rank = row + 1
+        else:
+            board_col = col
+            board_rank = 8 - row
 
-        return f"{file}{rank}"
+        return f"{FILES[board_col]}{board_rank}"
 
     def square_to_xy(self, square):
         file = square[0]
         rank = int(square[1])
 
-        col = FILES.index(file)
-        row = 8 - rank
+        logical_col = FILES.index(file)
+        logical_row = 8 - rank
 
-        x = col * self.cell_size
-        y = row * self.cell_size
+        if self.board_flipped:
+            col = 7 - logical_col
+            row = 7 - logical_row
+        else:
+            col = logical_col
+            row = logical_row
 
-        return x, y
+        return col * self.cell_size, row * self.cell_size
+
+    def is_human_turn(self):
+        turn_text = str(self.game.turn()) if callable(self.game.turn) else str(self.game.turn)
+        return self.human_color in turn_text
+
+    def is_ai_turn(self):
+        turn_text = str(self.game.turn()) if callable(self.game.turn) else str(self.game.turn)
+        return self.ai_color in turn_text
 
     def draw(self):
         self.canvas.delete("all")
@@ -194,7 +277,7 @@ class KishGUI:
         status = str(self.game.status()) if callable(self.game.status) else str(self.game.status)
 
         self.status_label.config(
-            text=f"Turn: {current_turn}   |   Status: {status}"
+            text=f"Turn: {current_turn} | Status: {status} | Depth: {self.ai_max_depth} | Time: {self.ai_time_limit_ms}ms"
         )
 
         legal_destinations = set()
@@ -204,30 +287,29 @@ class KishGUI:
                 if dst:
                     legal_destinations.add(dst)
 
-        for row in range(8):
-            for col in range(8):
-                x1 = col * self.cell_size
-                y1 = row * self.cell_size
+        for display_row in range(8):
+            for display_col in range(8):
+                x1 = display_col * self.cell_size
+                y1 = display_row * self.cell_size
                 x2 = x1 + self.cell_size
                 y2 = y1 + self.cell_size
 
-                square = f"{FILES[col]}{8 - row}"
+                if self.board_flipped:
+                    file_index = 7 - display_col
+                    rank = display_row + 1
+                else:
+                    file_index = display_col
+                    rank = 8 - display_row
 
-                color = "#d8b47b" if (row + col) % 2 == 0 else "#8b5a2b"
+                square = f"{FILES[file_index]}{rank}"
+                color = "#d8b47b" if (display_row + display_col) % 2 == 0 else "#8b5a2b"
 
                 if square == self.selected_square:
                     color = "#e0d060"
                 elif square in legal_destinations:
                     color = "#7fc97f"
 
-                self.canvas.create_rectangle(
-                    x1, y1, x2, y2,
-                    fill=color,
-                    outline="#2a1c10",
-                    width=2
-                )
-
-                # Square label
+                self.canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline="#2a1c10", width=2)
                 self.canvas.create_text(
                     x1 + 8,
                     y1 + 8,
@@ -238,7 +320,6 @@ class KishGUI:
                 )
 
                 piece = board.get(square, ".")
-
                 if piece != ".":
                     self.draw_piece(x1, y1, piece)
 
@@ -264,43 +345,25 @@ class KishGUI:
             outline = "#333"
             text_color = "#fff"
 
-        self.canvas.create_oval(
-            cx - r, cy - r, cx + r, cy + r,
-            fill=fill,
-            outline=outline,
-            width=3
-        )
+        self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill=fill, outline=outline, width=3)
 
         if is_king:
-            self.canvas.create_text(
-                cx,
-                cy,
-                text="K",
-                fill=text_color,
-                font=("Segoe UI", 18, "bold")
-            )
+            self.canvas.create_text(cx, cy, text="K", fill=text_color, font=("Segoe UI", 18, "bold"))
 
     def on_click(self, event):
-        if self.ai_busy:
+        if self.ai_busy or not self.is_human_turn():
             return
 
-        turn_text = str(self.game.turn()) if callable(self.game.turn) else str(self.game.turn)
-        if "White" not in turn_text:
-            return
         square = self.coord_to_square(event.x, event.y)
         if not square:
             return
 
         board = self.get_board_matrix()
         piece = board.get(square, ".")
-
-        # Player is White only in this first version
-        turn_text = str(self.game.turn()) if callable(self.game.turn) else str(self.game.turn)
-        if "White" not in turn_text:
-            return
+        player_piece_prefix = "w" if self.human_color == "White" else "b"
 
         if self.selected_square is None:
-            if piece.lower().startswith("w"):
+            if piece.lower().startswith(player_piece_prefix):
                 actions = self.get_actions_from_square(square)
                 if actions:
                     self.selected_square = square
@@ -312,8 +375,7 @@ class KishGUI:
         if action:
             self.make_player_move(action)
         else:
-            # If clicked another white piece, select it
-            if piece.lower().startswith("w"):
+            if piece.lower().startswith(player_piece_prefix):
                 actions = self.get_actions_from_square(square)
                 if actions:
                     self.selected_square = square
@@ -335,28 +397,19 @@ class KishGUI:
 
         self.selected_square = None
         self.draw()
+        self.maybe_schedule_ai_move()
 
-        turn_text = str(self.game.turn()) if callable(self.game.turn) else str(self.game.turn)
-
-        # لا تستدعِ الكمبيوتر إلا إذا صار الدور للأسود فعلاً
-        if "Black" in turn_text and self.ai_after_id is None:
-            self.ai_busy = True
-            self.ai_after_id = self.root.after(350, self.ai_move)
     def get_action_value(self, action, name, default=None):
         value = getattr(action, name, default)
-
         if callable(value):
             try:
                 return value()
             except Exception:
                 return default
-
         return value
-
 
     def get_piece_counts_from_board(self):
         board = self.get_board_matrix()
-
         white_men = 0
         black_men = 0
         white_kings = 0
@@ -364,18 +417,15 @@ class KishGUI:
 
         for piece in board.values():
             p = str(piece)
-
             if p == ".":
                 continue
 
             lower = p.lower()
-
             if "w" in lower:
                 if "k" in lower or p.isupper():
                     white_kings += 1
                 else:
                     white_men += 1
-
             elif "b" in lower:
                 if "k" in lower or p.isupper():
                     black_kings += 1
@@ -384,151 +434,148 @@ class KishGUI:
 
         return white_men, white_kings, black_men, black_kings
 
-
     def evaluate_position(self):
-        """
-        Positive score = good for Black AI
-        Negative score = good for White player
-        """
         white_men, white_kings, black_men, black_kings = self.get_piece_counts_from_board()
 
-        score = 0
+        black_score = (black_men * 100) + (black_kings * 280)
+        white_score = (white_men * 100) + (white_kings * 280)
+        score = black_score - white_score
 
-        # Material
-        score += black_men * 100
-        score += black_kings * 260
-        score -= white_men * 100
-        score -= white_kings * 260
-
-        # Mobility
         try:
-            turn_text = str(self.game.turn()) if callable(self.game.turn) else str(self.game.turn)
             mobility = len(self.game.actions())
-
+            turn_text = str(self.game.turn()) if callable(self.game.turn) else str(self.game.turn)
             if "Black" in turn_text:
-                score += mobility * 3
+                score += mobility * 2
             elif "White" in turn_text:
-                score -= mobility * 3
+                score -= mobility * 2
         except Exception:
             pass
 
         return score
 
-
     def move_order_score(self, action):
         score = 0
-
         is_capture = bool(self.get_action_value(action, "is_capture", False))
         capture_count = int(self.get_action_value(action, "capture_count", 0) or 0)
         is_promotion = bool(self.get_action_value(action, "is_promotion", False))
 
         if is_capture:
-            score += 1000 + capture_count * 300
-
+            score += 2000 + capture_count * 300
         if is_promotion:
-            score += 500
+            score += 700
 
         return score
 
+    def game_state_key(self):
+        turn_text = str(self.game.turn()) if callable(self.game.turn) else str(self.game.turn)
+        return f"{turn_text}|{str(self.game.board())}"
+
+    def search_time_exceeded(self):
+        return time.perf_counter() >= self.search_deadline
 
     def negamax(self, depth, alpha, beta, color):
-        """
-        color:
-        +1 when current side is Black AI perspective
-        -1 when current side is White player perspective
-        """
+        if self.search_time_exceeded():
+            raise SearchTimeout()
+
+        state_key = self.game_state_key()
+        tt_key = (state_key, depth, color)
+        if tt_key in self.tt:
+            return self.tt[tt_key]
+
         actions = self.game.actions()
-
         if depth == 0 or not actions:
-            return color * self.evaluate_position()
+            value = color * self.evaluate_position()
+            self.tt[tt_key] = value
+            return value
 
-        # Better move ordering makes alpha-beta much faster
-        actions = sorted(actions, key=self.move_order_score, reverse=True)
-
+        ordered = sorted(actions, key=self.move_order_score, reverse=True)
         best_score = -10**9
 
-        for action in actions:
+        for action in ordered:
+            self.game.make_move(action)
             try:
-                self.game.make_move(action)
-            except Exception:
-                continue
-
-            score = -self.negamax(depth - 1, -beta, -alpha, -color)
-
-            try:
+                score = -self.negamax(depth - 1, -beta, -alpha, -color)
+            finally:
                 self.game.undo_move()
-            except Exception:
-                pass
 
             if score > best_score:
                 best_score = score
 
-            alpha = max(alpha, score)
-
+            if score > alpha:
+                alpha = score
             if alpha >= beta:
                 break
 
+        self.tt[tt_key] = best_score
         return best_score
 
-
-    def find_best_move(self, depth=5):
+    def find_best_move(self, max_depth, time_limit_ms):
         actions = self.game.actions()
-
         if not actions:
             return None
 
-        # Strong ordering before search
-        actions = sorted(actions, key=self.move_order_score, reverse=True)
+        self.search_deadline = time.perf_counter() + (time_limit_ms / 1000.0)
+        ordered_root = sorted(actions, key=self.move_order_score, reverse=True)
 
-        best_action = None
-        best_score = -10**9
+        fallback = random.choice(actions)
+        best_overall = ordered_root[0] if ordered_root else fallback
 
-        for action in actions:
+        for depth in range(1, max_depth + 1):
+            if self.search_time_exceeded():
+                break
+
+            best_action = None
+            best_score = -10**9
+
             try:
-                self.game.make_move(action)
-            except Exception:
-                continue
+                for action in ordered_root:
+                    if self.search_time_exceeded():
+                        raise SearchTimeout()
 
-            score = -self.negamax(depth - 1, -10**9, 10**9, -1)
+                    self.game.make_move(action)
+                    try:
+                        score = -self.negamax(depth - 1, -10**9, 10**9, -1)
+                    finally:
+                        self.game.undo_move()
 
-            try:
-                self.game.undo_move()
-            except Exception:
-                pass
+                    score += self.move_order_score(action) * 0.001
 
-            # Add tiny preference for stronger tactical moves if equal
-            score += self.move_order_score(action) * 0.001
+                    if score > best_score:
+                        best_score = score
+                        best_action = action
 
-            if score > best_score:
-                best_score = score
-                best_action = action
+                if best_action is not None:
+                    best_overall = best_action
+                    ordered_root.sort(key=lambda a: (a != best_overall, -self.move_order_score(a)))
 
-        print(f"AI selected: {best_action} | score: {best_score:.2f} | depth: {depth}")
+            except SearchTimeout:
+                break
 
-        return best_action    
+        return best_overall
+
+    def maybe_schedule_ai_move(self):
+        if self.is_ai_turn() and not self.ai_busy and self.ai_after_id is None:
+            self.ai_busy = True
+            self.ai_after_id = self.root.after(250, self.ai_move)
+
     def ai_move(self):
         self.ai_after_id = None
 
-        turn_text = str(self.game.turn()) if callable(self.game.turn) else str(self.game.turn)
-
-        # حماية مهمة: إذا لم يكن الدور للأسود، لا يتحرك الكمبيوتر
-        if "Black" not in turn_text:
+        if not self.is_ai_turn():
             self.ai_busy = False
             self.draw()
             return
 
         actions = self.game.actions()
-
         if not actions:
             self.ai_busy = False
             self.draw()
             messagebox.showinfo("Game Over", "No legal moves.")
             return
 
-        depth = 5
-
-        action = self.find_best_move(depth=depth)
-
+        self.on_settings_changed()
+        self.tt.clear()
+        action = self.find_best_move(max_depth=self.ai_max_depth, time_limit_ms=self.ai_time_limit_ms)
         if action is None:
             action = random.choice(actions)
 
@@ -541,47 +588,6 @@ class KishGUI:
 
         self.ai_busy = False
         self.selected_square = None
-        self.draw()
-
-        # Simple AI:
-        # Prefer captures. If no capture, random move.
-        def get_action_value(action, name, default=None):
-            value = getattr(action, name, default)
-
-            if callable(value):
-                try:
-                    return value()
-                except Exception:
-                    return default
-
-            return value
-
-
-        capture_actions = [
-            a for a in actions
-            if bool(get_action_value(a, "is_capture", False))
-        ]
-
-        if capture_actions:
-            best_capture_count = max(
-                int(get_action_value(a, "capture_count", 0) or 0)
-                for a in capture_actions
-            )
-
-            best_actions = [
-                a for a in capture_actions
-                if int(get_action_value(a, "capture_count", 0) or 0) == best_capture_count
-            ]
-
-            action = random.choice(best_actions)
-        else:
-            action = random.choice(actions)
-
-        try:
-            self.game.make_move(action)
-        except Exception as e:
-            messagebox.showerror("AI Move Error", str(e))
-
         self.draw()
 
 
