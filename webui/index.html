@@ -1,16 +1,202 @@
-<!doctype html><html lang="en"><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Turkish Draughts</title>
-<style>body{font-family:system-ui;background:#111;color:#eee;display:grid;place-items:center;min-height:100vh} .wrap{display:flex;gap:20px;align-items:flex-start}.board{display:grid;grid-template-columns:repeat(8,56px);gap:2px;background:#444;padding:6px}.cell{width:56px;height:56px;border:0;cursor:pointer;background:#d8b57e}.cell.dark{background:#9b6f3c}.cell.sel{outline:3px solid #39f}.cell.move{box-shadow:inset 0 0 0 3px #33cc66}.piece{width:40px;height:40px;border-radius:50%;margin:auto}.w{background:#f2f2f2}.b{background:#222}.k{border:3px solid gold}.panel{min-width:240px}.btn{width:100%;padding:8px;margin:6px 0}</style>
-<div class="wrap"><div id="board" class="board"></div><div class="panel"><h3>Turkish Draughts</h3><div id="status"></div><label>Depth <input id="depth" type="number" min="1" max="12" value="7"/></label><button class="btn" id="setDepth">Apply Depth</button><button class="btn" id="aiBtn">AI Move</button><button class="btn" id="resetBtn">Reset</button></div></div>
-<script>
-let state, selected=-1;
-async function api(p,o={}){const r=await fetch('/api/'+p,{headers:{'Content-Type':'application/json'},...o}); if(!r.ok) throw new Error(await r.text()); return r.json();}
-function idx(x,y){return y*8+x}
-function render(){const b=document.getElementById('board'); b.innerHTML=''; const moves=(selected>=0&&state.validMoves[selected])?state.validMoves[selected]:[]; document.getElementById('status').textContent=`Turn: ${state.turn}${state.gameOver?` | ${state.draw?'Draw':'Winner: '+state.winner}`:''}${state.isTakeMap?' | Forced capture':''}`;
-for(let y=0;y<8;y++)for(let x=0;x<8;x++){const i=idx(x,y), c=document.createElement('button'); c.className='cell '+((x+y)%2?'dark':''); if(i===selected)c.classList.add('sel'); if(moves.includes(i)) c.classList.add('move'); c.onclick=()=>onClick(i); const ch=state.board[y][x]; if(ch!=='-'){const p=document.createElement('div'); p.className='piece '+((ch==='w'||ch==='W')?'w':'b')+((ch==='W'||ch==='B')?' k':''); c.appendChild(p);} b.appendChild(c);} }
-async function refresh(){state=await api('state'); document.getElementById('depth').value=state.depth; render();}
-async function onClick(i){if(state.gameOver) return; if(selected>=0 && state.validMoves[selected] && state.validMoves[selected].includes(i)){state=await api('move',{method:'POST',body:JSON.stringify({from:selected,to:i})}); selected=-1; render(); return;} if(state.validMoves[i]) selected=i; else selected=-1; render();}
-document.getElementById('aiBtn').onclick=async()=>{state=await api('ai',{method:'POST'}); selected=-1; render();};
-document.getElementById('resetBtn').onclick=async()=>{state=await api('reset',{method:'POST'}); selected=-1; render();};
-document.getElementById('setDepth').onclick=async()=>{const d=Number(document.getElementById('depth').value||7); state=await api('depth',{method:'POST',body:JSON.stringify({depth:d})}); render();};
-refresh();
-</script></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Turkish Draughts</title>
+  <style>
+    body { font-family: system-ui; background: #111; color: #eee; display: grid; place-items: center; min-height: 100vh; margin: 0; }
+    .wrap { display: flex; gap: 20px; align-items: flex-start; padding: 24px; }
+    .board { display: grid; grid-template-columns: repeat(8, 56px); gap: 2px; background: #444; padding: 6px; border-radius: 8px; }
+    .cell { width: 56px; height: 56px; border: 0; cursor: pointer; background: #d8b57e; display: flex; align-items: center; justify-content: center; }
+    .cell.dark { background: #9b6f3c; }
+    .cell.sel { outline: 3px solid #39f; }
+    .cell.move { box-shadow: inset 0 0 0 3px #33cc66; }
+    .cell.disabled { cursor: not-allowed; opacity: 0.85; }
+    .piece { width: 40px; height: 40px; border-radius: 50%; }
+    .w { background: #f2f2f2; }
+    .b { background: #222; }
+    .k { border: 3px solid gold; box-sizing: border-box; }
+    .panel { min-width: 280px; }
+    .btn { width: 100%; padding: 8px; margin: 6px 0; }
+    .row { margin: 10px 0; }
+    .group { display: flex; gap: 12px; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div id="board" class="board"></div>
+    <div class="panel">
+      <h3>Turkish Draughts</h3>
+      <div id="status"></div>
+
+      <div class="row">
+        <label for="depth">Depth</label>
+        <input id="depth" type="number" min="1" max="12" value="7" />
+        <button class="btn" id="setDepth">Apply Depth</button>
+      </div>
+
+      <div class="row">
+        <div>Play as</div>
+        <div class="group">
+          <label><input type="radio" name="side" value="white" checked /> White</label>
+          <label><input type="radio" name="side" value="black" /> Black</label>
+        </div>
+      </div>
+
+      <button class="btn" id="flipBtn">Flip Board</button>
+      <button class="btn" id="resetBtn">New Game</button>
+      <button class="btn" id="aiBtn">AI Move (Manual)</button>
+    </div>
+  </div>
+
+  <script>
+    let state;
+    let selected = -1;
+    let flipped = false;
+    let humanSide = 'white';
+    let aiBusy = false;
+
+    async function api(path, options = {}) {
+      const response = await fetch('/api/' + path, {
+        headers: { 'Content-Type': 'application/json' },
+        ...options,
+      });
+      if (!response.ok) throw new Error(await response.text());
+      return response.json();
+    }
+
+    function boardIndexToView(index) {
+      const x = index % 8;
+      const y = Math.floor(index / 8);
+      return flipped ? { x: 7 - x, y: 7 - y } : { x, y };
+    }
+
+    function viewToBoardIndex(x, y) {
+      const bx = flipped ? 7 - x : x;
+      const by = flipped ? 7 - y : y;
+      return by * 8 + bx;
+    }
+
+    function isHumanTurn() {
+      return state && !state.gameOver && state.turn === humanSide;
+    }
+
+    function setStatus() {
+      const role = `You: ${humanSide} | AI: ${humanSide === 'white' ? 'black' : 'white'}`;
+      const game = state.gameOver
+        ? (state.draw ? 'Draw' : `Winner: ${state.winner}`)
+        : `Turn: ${state.turn}`;
+      const capture = state.isTakeMap ? ' | Forced capture' : '';
+      document.getElementById('status').textContent = `${game}${capture} | ${role}`;
+    }
+
+    function render() {
+      const board = document.getElementById('board');
+      board.innerHTML = '';
+      setStatus();
+      const moves = selected >= 0 && state.validMoves[selected] ? state.validMoves[selected] : [];
+
+      for (let vy = 0; vy < 8; vy++) {
+        for (let vx = 0; vx < 8; vx++) {
+          const boardIndex = viewToBoardIndex(vx, vy);
+          const cell = document.createElement('button');
+          cell.className = 'cell ' + ((vx + vy) % 2 ? 'dark' : '');
+          if (!isHumanTurn()) cell.classList.add('disabled');
+          if (boardIndex === selected) cell.classList.add('sel');
+          if (moves.includes(boardIndex)) cell.classList.add('move');
+
+          cell.onclick = () => onClick(boardIndex);
+
+          const pos = boardIndexToView(boardIndex);
+          const ch = state.board[pos.y][pos.x];
+          if (ch !== '-') {
+            const piece = document.createElement('div');
+            piece.className = 'piece ' + ((ch === 'w' || ch === 'W') ? 'w' : 'b') + ((ch === 'W' || ch === 'B') ? ' k' : '');
+            cell.appendChild(piece);
+          }
+
+          board.appendChild(cell);
+        }
+      }
+    }
+
+    async function refresh() {
+      state = await api('state');
+      document.getElementById('depth').value = state.depth;
+      render();
+      await maybeTriggerAI();
+    }
+
+    async function maybeTriggerAI() {
+      if (aiBusy || !state || state.gameOver || state.turn === humanSide) return;
+      aiBusy = true;
+      try {
+        state = await api('ai', { method: 'POST' });
+        selected = -1;
+        render();
+      } finally {
+        aiBusy = false;
+      }
+
+      if (!state.gameOver && state.turn !== humanSide) {
+        await maybeTriggerAI();
+      }
+    }
+
+    async function onClick(index) {
+      if (!isHumanTurn()) return;
+
+      if (selected >= 0 && state.validMoves[selected] && state.validMoves[selected].includes(index)) {
+        state = await api('move', { method: 'POST', body: JSON.stringify({ from: selected, to: index }) });
+        selected = -1;
+        render();
+        await maybeTriggerAI();
+        return;
+      }
+
+      selected = state.validMoves[index] ? index : -1;
+      render();
+    }
+
+    document.getElementById('setDepth').onclick = async () => {
+      const depth = Number(document.getElementById('depth').value || 7);
+      state = await api('depth', { method: 'POST', body: JSON.stringify({ depth }) });
+      render();
+      await maybeTriggerAI();
+    };
+
+    document.getElementById('aiBtn').onclick = async () => {
+      state = await api('ai', { method: 'POST' });
+      selected = -1;
+      render();
+      await maybeTriggerAI();
+    };
+
+    document.getElementById('resetBtn').onclick = async () => {
+      state = await api('reset', { method: 'POST' });
+      selected = -1;
+      render();
+      await maybeTriggerAI();
+    };
+
+    document.getElementById('flipBtn').onclick = () => {
+      flipped = !flipped;
+      render();
+    };
+
+    document.querySelectorAll('input[name="side"]').forEach((el) => {
+      el.addEventListener('change', async (event) => {
+        humanSide = event.target.value;
+        selected = -1;
+        flipped = humanSide === 'black';
+        state = await api('reset', { method: 'POST' });
+        render();
+        await maybeTriggerAI();
+      });
+    });
+
+    refresh();
+  </script>
+</body>
+</html>
