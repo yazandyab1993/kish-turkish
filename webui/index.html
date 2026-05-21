@@ -47,6 +47,8 @@
       <button class="btn" id="flipBtn">Flip Board</button>
       <button class="btn" id="resetBtn">New Game</button>
       <button class="btn" id="aiBtn">AI Move (Manual)</button>
+      <div class="row"><h4>Engine Analysis</h4><div id="analysis"></div></div>
+      <div class="row"><h4>Moves</h4><div id="history"></div></div>
     </div>
   </div>
 
@@ -58,6 +60,7 @@
     let aiBusy = false;
     let uiBusy = false;
     let busyReason = '';
+    let analysisTimer = null;
 
     async function api(path, options = {}) {
       const response = await fetch('/api/' + path, {
@@ -82,6 +85,20 @@
 
     function isHumanTurn() {
       return state && !state.gameOver && state.turn === humanSide;
+    }
+
+    function renderAnalysis() {
+      const el = document.getElementById('analysis');
+      if (!state || !el) return;
+      const st = state.engineStats || {};
+      el.innerHTML = `Depth: ${state.depth}<br/>In progress: ${Boolean(st.inProgress)}<br/>Eval: ${st.evaluation ?? 0}<br/>Nodes: ${st.nodes ?? 0}<br/>TT hits: ${st.tableHits ?? 0}<br/>Time: ${st.durationMs ?? 0}ms`;
+    }
+
+    function renderHistory() {
+      const el = document.getElementById('history');
+      if (!state || !el) return;
+      const rows = (state.history || []).map((m, i) => `${i + 1}. ${m.turn} eval=${m.evaluation} (${m.durationMs}ms)`);
+      el.innerHTML = rows.length ? rows.join('<br/>') : 'No moves yet';
     }
 
     function setStatus() {
@@ -120,6 +137,8 @@
       const board = document.getElementById('board');
       board.innerHTML = '';
       setStatus();
+      renderAnalysis();
+      renderHistory();
       const moves = selected >= 0 && state.validMoves[selected] ? state.validMoves[selected] : [];
 
       for (let vy = 0; vy < 8; vy++) {
@@ -158,6 +177,7 @@
       if (aiBusy || !state || state.gameOver || state.turn === humanSide) return;
       aiBusy = true;
       setUiBusy(true, 'AI thinking...');
+      startAnalysisPolling();
       try {
         state = await api('ai', { method: 'POST' });
         selected = -1;
@@ -167,12 +187,29 @@
       } finally {
         aiBusy = false;
         setUiBusy(false);
+        stopAnalysisPolling();
         render();
       }
 
       if (!state.gameOver && state.turn !== humanSide) {
         await maybeTriggerAI();
       }
+    }
+
+    function startAnalysisPolling() {
+      stopAnalysisPolling();
+      analysisTimer = setInterval(async () => {
+        try {
+          const stats = await api('analysis');
+          if (state) state.engineStats = stats;
+          renderAnalysis();
+        } catch (_) {}
+      }, 300);
+    }
+
+    function stopAnalysisPolling() {
+      if (analysisTimer) clearInterval(analysisTimer);
+      analysisTimer = null;
     }
 
     async function onClick(index) {
@@ -214,6 +251,7 @@
         return;
       } finally {
         setUiBusy(false);
+        stopAnalysisPolling();
       }
 
       await maybeTriggerAI();
@@ -230,6 +268,7 @@
         showError(error, 'Failed to run AI move');
       } finally {
         setUiBusy(false);
+        stopAnalysisPolling();
       }
       await maybeTriggerAI();
     };
@@ -245,6 +284,7 @@
         showError(error, 'Failed to reset game');
       } finally {
         setUiBusy(false);
+        stopAnalysisPolling();
       }
       await maybeTriggerAI();
     };
