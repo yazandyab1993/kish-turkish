@@ -3,6 +3,7 @@ package ui
 import (
 	"TurkishDraughts/Board"
 	"TurkishDraughts/UI/Theme"
+	"time"
 
 	"image/color"
 
@@ -16,6 +17,8 @@ import (
 const (
 	Width = 1600
 	Height = 900
+	idleFrameDelay = 30 * time.Millisecond
+	activeFrameDelay = 5 * time.Millisecond
 )
 
 var basicAtlas = text.NewAtlas(basicfont.Face7x13, text.ASCII) //Font
@@ -59,45 +62,44 @@ func Init() {
 
 	//Draw loop
 	for !win.Closed() {
+		frameDelay := idleFrameDelay
+		needsRedraw := false
+
 		//If a list of valid moves from this board hasnt been created, create one
 		if moveMap == nil {
 			nextPrevBoard = b
 			moveMap = ValidUiTakes(&b, -1, [2]int{0,0})
 			isTakeMap = true
+			needsRedraw = true
 		}
 		if len(moveMap) == 0 { 
 			moveMap = ValidUiMoves(&b)
 			isTakeMap = false
+			needsRedraw = true
 		}
-
-
-		//Drawing logic
-		
-		//New blank window
-		imd := imdraw.New(nil)
-		win.Clear(color.RGBA{0xFF, 0xFF, 0xFF, 0xFF})
-
-		//Select theme and then draw board and pieces
-		currentTheme := themes[themeIndex] 
-		currentTheme.DrawBoard(imd)	
-		if selectedTileIndex != -1 { currentTheme.DrawSelected(imd, selectedTileIndex) }
-		if isTakeMap { currentTheme.DrawChecks(imd, moveMap) }
-		//Mouse data is theme specific since tiles can be in slightly different alignments
-		if selectedTileIndex != -1 { currentTheme.DrawMoves(imd, selectedTileIndex, moveMap) }
-		clicked, released, tileIndex := currentTheme.GetMouseData(win) 
-		currentTheme.DrawPieces(imd, &b)
-		drawControls(imd, win, autoMoveBlack, autoMoveWhite, lastEval)
+		currentTheme := themes[themeIndex]
+		clicked, released, tileIndex := currentTheme.GetMouseData(win)
 
 		//Control logic
-		if win.JustPressed(pixelgl.Key1) { autoMoveBlack = !autoMoveBlack } //Toggle ai white
-		if win.JustPressed(pixelgl.Key2) { autoMoveWhite = !autoMoveWhite } //Toggle ai black
+		if win.JustPressed(pixelgl.Key1) {
+			autoMoveBlack = !autoMoveBlack
+			needsRedraw = true
+		} //Toggle ai white
+		if win.JustPressed(pixelgl.Key2) {
+			autoMoveWhite = !autoMoveWhite
+			needsRedraw = true
+		} //Toggle ai black
 		if win.JustPressed(pixelgl.KeyMinus) { //Decrement search depth
 			board.MaxDepth -= 1
 			if board.MaxDepth < 0 {
 				board.MaxDepth = 0
 			}
+			needsRedraw = true
 		}
-		if win.JustPressed(pixelgl.KeyEqual) { board.MaxDepth += 1 } //Increment search depth
+		if win.JustPressed(pixelgl.KeyEqual) {
+			board.MaxDepth += 1
+			needsRedraw = true
+		} //Increment search depth
 		if win.JustPressed(pixelgl.KeyZ) { //Undo move
 			if len(previousBoards) > 0 {
 				b = previousBoards[len(previousBoards)-1]
@@ -105,6 +107,7 @@ func Init() {
 				selectedTileIndex = -1
 				moveMap = nil
 				lastEval = nil
+				needsRedraw = true
 			}
 		}
 
@@ -113,26 +116,26 @@ func Init() {
 			if themeIndex < 0 {
 				themeIndex = len(themes) - 1
 			}
+			needsRedraw = true
 		}
 		if win.JustPressed(pixelgl.KeyRight) { //Cycle next theme
 			themeIndex++
 			if themeIndex >= len(themes) {
 				themeIndex = 0
 			}
+			needsRedraw = true
 		}
-
-		//Finish drawing
-		imd.Draw(win)
-		win.Update()
 
 		//Check if the game is won, if it is don't allow any user input or ai moves
 		gameWon, _, gameDraw := b.PlayerHasWon()
-		if gameWon || gameDraw { continue }
+		if gameWon || gameDraw {
+			needsRedraw = true
+		}
 
 		//User input
 
 		//Check that ai isn't playing for the current side
-		if (!autoMoveWhite && b.Turn == board.White) || (!autoMoveBlack && b.Turn == board.Black) {
+		if !gameWon && !gameDraw && ((!autoMoveWhite && b.Turn == board.White) || (!autoMoveBlack && b.Turn == board.Black)) {
 			//Select a tile if we haven't clicked on a move square 
 			if contains(moveMap[selectedTileIndex], tileIndex) {
 				if clicked || released {
@@ -145,17 +148,21 @@ func Init() {
 						lastEval = nil
 						b.SwapTeam()
 						previousBoards = append(previousBoards, nextPrevBoard)
+						needsRedraw = true
 					} else {
 						selectedTileIndex = tileIndex
+						needsRedraw = true
 					}
 				}
 			} else {
 				if clicked {
 					selectedTileIndex = tileIndex
+					needsRedraw = true
 				}
 			}
-		} else { //In the event that the ai is playing
+		} else if !gameWon && !gameDraw { //In the event that the ai is playing
 			//Engine logic
+			frameDelay = activeFrameDelay
 
 			//If we are still expecting more moves to be evaluated do nothing
 			if totalMoves != len(possibleMoves) {
@@ -164,11 +171,14 @@ func Init() {
 				case pMove := <-output:
 					//Add it to the list of known results
 					possibleMoves = append(possibleMoves, pMove)
+					needsRedraw = true
+				default:
 				}
 			} else if !searching { //Otherwise if we haven't started searching, start
 				searching = true
 				possibleMoves = []PossibleMove{}
 				totalMoves = Search(b, output)
+				needsRedraw = true
 				//Start searching board states
 			} 
 
@@ -190,8 +200,30 @@ func Init() {
 				moveMap = nil
 				lastEval = &bestMove
 				previousBoards = append(previousBoards, nextPrevBoard)
+				needsRedraw = true
 			}
 		}
+
+		//Drawing logic
+		if needsRedraw || clicked || released || win.JustPressed(pixelgl.KeyEscape) {
+			imd := imdraw.New(nil)
+			win.Clear(color.RGBA{0xFF, 0xFF, 0xFF, 0xFF})
+			currentTheme.DrawBoard(imd)
+			if selectedTileIndex != -1 {
+				currentTheme.DrawSelected(imd, selectedTileIndex)
+			}
+			if isTakeMap {
+				currentTheme.DrawChecks(imd, moveMap)
+			}
+			if selectedTileIndex != -1 {
+				currentTheme.DrawMoves(imd, selectedTileIndex, moveMap)
+			}
+			currentTheme.DrawPieces(imd, &b)
+			drawControls(imd, win, autoMoveBlack, autoMoveWhite, lastEval)
+			imd.Draw(win)
+		}
+		win.Update()
+		time.Sleep(frameDelay)
 	}
 }
 
