@@ -1,0 +1,16 @@
+<!doctype html><html lang="en"><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Turkish Draughts</title>
+<style>body{font-family:system-ui;background:#111;color:#eee;display:grid;place-items:center;min-height:100vh} .wrap{display:flex;gap:20px;align-items:flex-start}.board{display:grid;grid-template-columns:repeat(8,56px);gap:2px;background:#444;padding:6px}.cell{width:56px;height:56px;border:0;cursor:pointer;background:#d8b57e}.cell.dark{background:#9b6f3c}.cell.sel{outline:3px solid #39f}.cell.move{box-shadow:inset 0 0 0 3px #33cc66}.piece{width:40px;height:40px;border-radius:50%;margin:auto}.w{background:#f2f2f2}.b{background:#222}.k{border:3px solid gold}.panel{min-width:240px}.btn{width:100%;padding:8px;margin:6px 0}</style>
+<div class="wrap"><div id="board" class="board"></div><div class="panel"><h3>Turkish Draughts</h3><div id="status"></div><label>Depth <input id="depth" type="number" min="1" max="12" value="7"/></label><button class="btn" id="setDepth">Apply Depth</button><button class="btn" id="aiBtn">AI Move</button><button class="btn" id="resetBtn">Reset</button></div></div>
+<script>
+let state, selected=-1;
+async function api(p,o={}){const r=await fetch('/api/'+p,{headers:{'Content-Type':'application/json'},...o}); if(!r.ok) throw new Error(await r.text()); return r.json();}
+function idx(x,y){return y*8+x}
+function render(){const b=document.getElementById('board'); b.innerHTML=''; const moves=(selected>=0&&state.validMoves[selected])?state.validMoves[selected]:[]; document.getElementById('status').textContent=`Turn: ${state.turn}${state.gameOver?` | ${state.draw?'Draw':'Winner: '+state.winner}`:''}${state.isTakeMap?' | Forced capture':''}`;
+for(let y=0;y<8;y++)for(let x=0;x<8;x++){const i=idx(x,y), c=document.createElement('button'); c.className='cell '+((x+y)%2?'dark':''); if(i===selected)c.classList.add('sel'); if(moves.includes(i)) c.classList.add('move'); c.onclick=()=>onClick(i); const ch=state.board[y][x]; if(ch!=='-'){const p=document.createElement('div'); p.className='piece '+((ch==='w'||ch==='W')?'w':'b')+((ch==='W'||ch==='B')?' k':''); c.appendChild(p);} b.appendChild(c);} }
+async function refresh(){state=await api('state'); document.getElementById('depth').value=state.depth; render();}
+async function onClick(i){if(state.gameOver) return; if(selected>=0 && state.validMoves[selected] && state.validMoves[selected].includes(i)){state=await api('move',{method:'POST',body:JSON.stringify({from:selected,to:i})}); selected=-1; render(); return;} if(state.validMoves[i]) selected=i; else selected=-1; render();}
+document.getElementById('aiBtn').onclick=async()=>{state=await api('ai',{method:'POST'}); selected=-1; render();};
+document.getElementById('resetBtn').onclick=async()=>{state=await api('reset',{method:'POST'}); selected=-1; render();};
+document.getElementById('setDepth').onclick=async()=>{const d=Number(document.getElementById('depth').value||7); state=await api('depth',{method:'POST',body:JSON.stringify({depth:d})}); render();};
+refresh();
+</script></html>
