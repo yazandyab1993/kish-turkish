@@ -92,6 +92,8 @@
     }
 
     function render() {
+      if (!state) return;
+
       const board = document.getElementById('board');
       board.innerHTML = '';
       setStatus();
@@ -108,8 +110,9 @@
 
           cell.onclick = () => onClick(boardIndex);
 
-          const pos = boardIndexToView(boardIndex);
-          const ch = state.board[pos.y][pos.x];
+          const boardX = boardIndex % 8;
+          const boardY = Math.floor(boardIndex / 8);
+          const ch = state.board[boardY][boardX];
           if (ch !== '-') {
             const piece = document.createElement('div');
             piece.className = 'piece ' + ((ch === 'w' || ch === 'W') ? 'w' : 'b') + ((ch === 'W' || ch === 'B') ? ' k' : '');
