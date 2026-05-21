@@ -6,22 +6,47 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 )
 
+type moveEntry struct {
+	From       int     `json:"from"`
+	To         int     `json:"to"`
+	Turn       string  `json:"turn"`
+	Evaluation float32 `json:"evaluation"`
+	DurationMs int64   `json:"durationMs"`
+}
+
+type engineStats struct {
+	InProgress  bool      `json:"inProgress"`
+	Nodes       int       `json:"nodes"`
+	TableHits   int       `json:"tableHits"`
+	Depth       int       `json:"depth"`
+	Evaluation  float32   `json:"evaluation"`
+	DurationMs  int64     `json:"durationMs"`
+	StartedAt   time.Time `json:"startedAt,omitempty"`
+	CompletedAt time.Time `json:"completedAt,omitempty"`
+}
+
 type gameState struct {
-	mu    sync.Mutex
-	board board.BoardState
+	mu           sync.Mutex
+	board        board.BoardState
+	history      []moveEntry
+	analysis     engineStats
+	aiInProgress bool
 }
 
 type stateResponse struct {
-	Board      []string      `json:"board"`
-	Turn       string        `json:"turn"`
-	GameOver   bool          `json:"gameOver"`
-	Winner     string        `json:"winner,omitempty"`
-	Draw       bool          `json:"draw"`
-	ValidMoves map[int][]int `json:"validMoves"`
-	IsTakeMap  bool          `json:"isTakeMap"`
-	Depth      int           `json:"depth"`
+	Board       []string      `json:"board"`
+	Turn        string        `json:"turn"`
+	GameOver    bool          `json:"gameOver"`
+	Winner      string        `json:"winner,omitempty"`
+	Draw        bool          `json:"draw"`
+	ValidMoves  map[int][]int `json:"validMoves"`
+	IsTakeMap   bool          `json:"isTakeMap"`
+	Depth       int           `json:"depth"`
+	History     []moveEntry   `json:"history"`
+	EngineStats engineStats   `json:"engineStats"`
 }
 
 type moveRequest struct {
@@ -42,6 +67,7 @@ func main() {
 	http.HandleFunc("/api/ai", g.handleAI)
 	http.HandleFunc("/api/depth", g.handleDepth)
 	http.HandleFunc("/api/reset", g.handleReset)
+	http.HandleFunc("/api/analysis", g.handleAnalysis)
 
 	log.Println("Web UI on http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
@@ -50,15 +76,21 @@ func main() {
 func (g *gameState) handleState(w http.ResponseWriter, _ *http.Request) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	writeJSON(w, snapshot(g.board))
+	writeJSON(w, snapshot(g.board, g.history, g.analysis))
 }
 func (g *gameState) handleReset(w http.ResponseWriter, _ *http.Request) {
 	g.mu.Lock()
 	g.board = board.CreateStartingBoard()
-	s := snapshot(g.board)
+	s := snapshot(g.board, g.history, g.analysis)
 	g.mu.Unlock()
 	writeJSON(w, s)
 }
+func (g *gameState) handleAnalysis(w http.ResponseWriter, _ *http.Request) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	writeJSON(w, g.analysis)
+}
+
 func (g *gameState) handleDepth(w http.ResponseWriter, r *http.Request) {
 	var req depthRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
@@ -90,43 +122,71 @@ func (g *gameState) handleMove(w http.ResponseWriter, r *http.Request) {
 	if swap || len(nextTakes) == 0 {
 		g.board.SwapTeam()
 	}
-	writeJSON(w, snapshot(g.board))
+	writeJSON(w, snapshot(g.board, g.history, g.analysis))
 }
 
 func (g *gameState) handleAI(w http.ResponseWriter, _ *http.Request) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
+	if g.aiInProgress {
+		g.mu.Unlock()
+		http.Error(w, "analysis already in progress", http.StatusConflict)
+		return
+	}
 	gameWon, _, draw := g.board.PlayerHasWon()
 	if gameWon || draw {
-		writeJSON(w, snapshot(g.board))
+		s := snapshot(g.board, g.history, g.analysis)
+		g.mu.Unlock()
+		writeJSON(w, s)
 		return
 	}
-	options := g.board.MaxTakeBoards()
+	current := g.board
+	g.aiInProgress = true
+	g.analysis = engineStats{InProgress: true, Depth: int(board.MaxDepth), StartedAt: time.Now()}
+	g.mu.Unlock()
+
+	start := time.Now()
+	options := current.MaxTakeBoards()
 	if len(options) == 0 {
-		options = g.board.AllMoveBoards()
+		options = current.AllMoveBoards()
 	}
 	if len(options) == 0 {
-		writeJSON(w, snapshot(g.board))
+		g.mu.Lock()
+		g.aiInProgress = false
+		g.analysis.InProgress = false
+		s := snapshot(g.board, g.history, g.analysis)
+		g.mu.Unlock()
+		writeJSON(w, s)
 		return
 	}
+
+	board.Hits = 0
+	board.Searches = 0
 	var best board.BoardState
 	var bestVal float32
 	for i, b := range options {
 		b.SwapTeam()
 		val := b.MinMax(0, -board.AlphaBetaMax, board.AlphaBetaMax, board.NewTable())
-		if i == 0 || (g.board.Turn == board.White && val > bestVal) || (g.board.Turn == board.Black && val < bestVal) {
+		if i == 0 || (current.Turn == board.White && val > bestVal) || (current.Turn == board.Black && val < bestVal) {
 			best, bestVal = b, val
 		}
 	}
-	_ = bestVal
+	duration := time.Since(start).Milliseconds()
+
+	g.mu.Lock()
 	g.board = best
-	writeJSON(w, snapshot(g.board))
+	g.aiInProgress = false
+	g.analysis = engineStats{InProgress: false, Nodes: board.Searches, TableHits: board.Hits - board.Searches, Depth: int(board.MaxDepth), Evaluation: bestVal, DurationMs: duration, StartedAt: start, CompletedAt: time.Now()}
+	g.history = append(g.history, moveEntry{From: -1, To: -1, Turn: map[board.TileTeam]string{board.White: "white", board.Black: "black"}[current.Turn], Evaluation: bestVal, DurationMs: duration})
+	s := snapshot(g.board, g.history, g.analysis)
+	g.mu.Unlock()
+
+	writeJSON(w, s)
 }
 
-func snapshot(bs board.BoardState) stateResponse {
+func snapshot(bs board.BoardState, history []moveEntry, stats engineStats) stateResponse {
 	gameOver, winner, draw := bs.PlayerHasWon()
 	moveMap, takeMap := legalMoveMap(&bs)
-	res := stateResponse{Board: toRows(bs), Turn: map[board.TileTeam]string{board.White: "white", board.Black: "black"}[bs.Turn], GameOver: gameOver || draw, Draw: draw, Winner: "", ValidMoves: moveMap, IsTakeMap: takeMap, Depth: int(board.MaxDepth)}
+	res := stateResponse{Board: toRows(bs), Turn: map[board.TileTeam]string{board.White: "white", board.Black: "black"}[bs.Turn], GameOver: gameOver || draw, Draw: draw, Winner: "", ValidMoves: moveMap, IsTakeMap: takeMap, Depth: int(board.MaxDepth), History: history, EngineStats: stats}
 	if gameOver {
 		res.Winner = map[board.TileTeam]string{board.White: "white", board.Black: "black"}[winner]
 	}
