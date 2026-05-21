@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 import random
 import re
 import time
@@ -17,7 +17,7 @@ class KishGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Turkish Dama - Kish Engine GUI")
-        self.root.geometry("720x830")
+        self.root.geometry("1020x830")
         self.root.resizable(False, False)
 
         self.game = kish.Game()
@@ -34,11 +34,23 @@ class KishGUI:
         self.ai_time_limit_ms = 1200
         self.search_deadline = 0.0
         self.tt = {}
+        self.current_search_depth = 0
+        self.last_analysis_rows = []
 
         self.cell_size = 72
         self.board_size = self.cell_size * 8
 
-        self.top_frame = tk.Frame(root, bg="#1f1f1f")
+        self.main_frame = tk.Frame(root, bg="#2b2b2b")
+        self.main_frame.pack(fill="both", expand=True)
+
+        self.left_frame = tk.Frame(self.main_frame, bg="#2b2b2b")
+        self.left_frame.pack(side="left", fill="y")
+
+        self.analysis_frame = tk.Frame(self.main_frame, bg="#1f1f1f", width=300)
+        self.analysis_frame.pack(side="right", fill="y")
+        self.analysis_frame.pack_propagate(False)
+
+        self.top_frame = tk.Frame(self.left_frame, bg="#1f1f1f")
         self.top_frame.pack(fill="x")
 
         self.status_label = tk.Label(
@@ -92,6 +104,14 @@ class KishGUI:
         )
         self.flip_btn.pack(side="left", padx=(0, 10))
 
+        self.analyze_btn = tk.Button(
+            controls,
+            text="Analyze",
+            font=("Segoe UI", 10, "bold"),
+            command=self.analyze_current_position
+        )
+        self.analyze_btn.pack(side="left", padx=(0, 10))
+
         self.new_btn = tk.Button(
             controls,
             text="New Game",
@@ -109,7 +129,7 @@ class KishGUI:
         self.undo_btn.pack(side="left")
 
         self.canvas = tk.Canvas(
-            root,
+            self.left_frame,
             width=self.board_size,
             height=self.board_size,
             bg="#222",
@@ -119,7 +139,7 @@ class KishGUI:
         self.canvas.bind("<Button-1>", self.on_click)
 
         self.info_label = tk.Label(
-            root,
+            self.left_frame,
             text="",
             font=("Segoe UI", 11),
             fg="#ddd",
@@ -128,15 +148,66 @@ class KishGUI:
         )
         self.info_label.pack(fill="x")
 
+        self.setup_analysis_panel()
+
         self.root.configure(bg="#2b2b2b")
 
         self.update_info_label()
         self.draw()
         self.maybe_schedule_ai_move()
 
+    def setup_analysis_panel(self):
+        title = tk.Label(
+            self.analysis_frame,
+            text="Move Analysis",
+            font=("Segoe UI", 13, "bold"),
+            bg="#1f1f1f",
+            fg="white",
+            pady=10
+        )
+        title.pack(fill="x")
+
+        columns = ("rank", "move", "score", "depth", "capture", "promotion")
+        self.analysis_tree = ttk.Treeview(self.analysis_frame, columns=columns, show="headings", height=26)
+        self.analysis_tree.heading("rank", text="#")
+        self.analysis_tree.heading("move", text="Move")
+        self.analysis_tree.heading("score", text="Score")
+        self.analysis_tree.heading("depth", text="Depth")
+        self.analysis_tree.heading("capture", text="Cap")
+        self.analysis_tree.heading("promotion", text="Prom")
+
+        self.analysis_tree.column("rank", width=35, anchor="center")
+        self.analysis_tree.column("move", width=95, anchor="center")
+        self.analysis_tree.column("score", width=65, anchor="e")
+        self.analysis_tree.column("depth", width=50, anchor="center")
+        self.analysis_tree.column("capture", width=45, anchor="center")
+        self.analysis_tree.column("promotion", width=55, anchor="center")
+
+        self.analysis_tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    def update_analysis_panel(self, rows):
+        self.last_analysis_rows = rows
+        for item in self.analysis_tree.get_children():
+            self.analysis_tree.delete(item)
+
+        for i, row in enumerate(rows, start=1):
+            self.analysis_tree.insert(
+                "",
+                "end",
+                values=(
+                    i,
+                    row["move"],
+                    f"{row['score']:.2f}",
+                    row["depth"],
+                    "Y" if row["capture"] else "-",
+                    "Y" if row["promotion"] else "-",
+                )
+            )
+
     def update_info_label(self):
+        board_view = "Flipped" if self.board_flipped else "Normal"
         self.info_label.config(
-            text=f"You play {self.human_color}. Click a piece, then click destination."
+            text=f"You: {self.human_color} | AI: {self.ai_color} | Board: {board_view}. Click a piece, then click destination."
         )
 
     def on_settings_changed(self):
@@ -162,6 +233,7 @@ class KishGUI:
 
     def toggle_board_flip(self):
         self.board_flipped = not self.board_flipped
+        self.update_info_label()
         self.draw()
 
     def new_game(self):
@@ -170,6 +242,7 @@ class KishGUI:
         self.selected_square = None
         self.tt.clear()
         self.update_info_label()
+        self.update_analysis_panel([])
         self.draw()
         self.maybe_schedule_ai_move()
 
@@ -243,22 +316,6 @@ class KishGUI:
             board_rank = 8 - row
 
         return f"{FILES[board_col]}{board_rank}"
-
-    def square_to_xy(self, square):
-        file = square[0]
-        rank = int(square[1])
-
-        logical_col = FILES.index(file)
-        logical_row = 8 - rank
-
-        if self.board_flipped:
-            col = 7 - logical_col
-            row = 7 - logical_row
-        else:
-            col = logical_col
-            row = logical_row
-
-        return col * self.cell_size, row * self.cell_size
 
     def is_human_turn(self):
         turn_text = str(self.game.turn()) if callable(self.game.turn) else str(self.game.turn)
@@ -437,16 +494,16 @@ class KishGUI:
     def evaluate_position(self):
         white_men, white_kings, black_men, black_kings = self.get_piece_counts_from_board()
 
-        black_score = (black_men * 100) + (black_kings * 280)
         white_score = (white_men * 100) + (white_kings * 280)
-        score = black_score - white_score
+        black_score = (black_men * 100) + (black_kings * 280)
+        score = white_score - black_score
 
         try:
             mobility = len(self.game.actions())
             turn_text = str(self.game.turn()) if callable(self.game.turn) else str(self.game.turn)
-            if "Black" in turn_text:
+            if "White" in turn_text:
                 score += mobility * 2
-            elif "White" in turn_text:
+            elif "Black" in turn_text:
                 score -= mobility * 2
         except Exception:
             pass
@@ -509,23 +566,37 @@ class KishGUI:
         self.tt[tt_key] = best_score
         return best_score
 
-    def find_best_move(self, max_depth, time_limit_ms):
+    def get_ai_color_sign(self):
+        return 1 if self.ai_color == "White" else -1
+
+    def analyze_current_position(self):
+        if self.ai_busy:
+            return
+        self.on_settings_changed()
+        self.tt.clear()
+        _, analysis_rows = self.find_best_move(self.ai_max_depth, self.ai_time_limit_ms, collect_analysis=True)
+        self.update_analysis_panel(analysis_rows)
+
+    def find_best_move(self, max_depth, time_limit_ms, collect_analysis=False):
         actions = self.game.actions()
         if not actions:
-            return None
+            return None, []
 
         self.search_deadline = time.perf_counter() + (time_limit_ms / 1000.0)
         ordered_root = sorted(actions, key=self.move_order_score, reverse=True)
 
         fallback = random.choice(actions)
         best_overall = ordered_root[0] if ordered_root else fallback
+        ai_sign = self.get_ai_color_sign()
+
+        best_analysis = []
 
         for depth in range(1, max_depth + 1):
             if self.search_time_exceeded():
                 break
 
-            best_action = None
-            best_score = -10**9
+            self.current_search_depth = depth
+            ranked = []
 
             try:
                 for action in ordered_root:
@@ -534,24 +605,34 @@ class KishGUI:
 
                     self.game.make_move(action)
                     try:
-                        score = -self.negamax(depth - 1, -10**9, 10**9, -1)
+                        score = -self.negamax(depth - 1, -10**9, 10**9, -ai_sign)
                     finally:
                         self.game.undo_move()
 
                     score += self.move_order_score(action) * 0.001
+                    ranked.append((score, action))
 
-                    if score > best_score:
-                        best_score = score
-                        best_action = action
+                ranked.sort(key=lambda item: item[0], reverse=True)
+                if ranked:
+                    best_overall = ranked[0][1]
+                    ordered_root = [item[1] for item in ranked]
 
-                if best_action is not None:
-                    best_overall = best_action
-                    ordered_root.sort(key=lambda a: (a != best_overall, -self.move_order_score(a)))
+                if collect_analysis:
+                    best_analysis = [
+                        {
+                            "move": str(act),
+                            "score": val,
+                            "depth": depth,
+                            "capture": bool(self.get_action_value(act, "is_capture", False)),
+                            "promotion": bool(self.get_action_value(act, "is_promotion", False)),
+                        }
+                        for val, act in ranked[:12]
+                    ]
 
             except SearchTimeout:
                 break
 
-        return best_overall
+        return best_overall, best_analysis
 
     def maybe_schedule_ai_move(self):
         if self.is_ai_turn() and not self.ai_busy and self.ai_after_id is None:
@@ -575,7 +656,7 @@ class KishGUI:
 
         self.on_settings_changed()
         self.tt.clear()
-        action = self.find_best_move(max_depth=self.ai_max_depth, time_limit_ms=self.ai_time_limit_ms)
+        action, analysis_rows = self.find_best_move(max_depth=self.ai_max_depth, time_limit_ms=self.ai_time_limit_ms, collect_analysis=True)
         if action is None:
             action = random.choice(actions)
 
@@ -588,6 +669,7 @@ class KishGUI:
 
         self.ai_busy = False
         self.selected_square = None
+        self.update_analysis_panel(analysis_rows)
         self.draw()
 
 
