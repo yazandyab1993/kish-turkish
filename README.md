@@ -110,6 +110,19 @@ If you want an interactive UI without Pixel/GLFW dependencies, use the lightweig
 go run ./cmd/webui
 ```
 
+
+Quick start commands:
+
+```bash
+make webui
+```
+
+or directly:
+
+```bash
+go run ./cmd/webui
+```
+
 Then open `http://localhost:8080`.
 
 This UI uses:
