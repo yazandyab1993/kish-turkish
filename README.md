@@ -101,3 +101,19 @@ I have tried using this a few times against [other real players](https://www.pla
 Pretty straightfoward either `go build -ldflags -H=windowsgui` or `go run main.go`, though because the graphics library uses a glfw backend you may need to install a C compiler. 
 
 ![](docs/preview.jpg)
+
+## Lightweight Web UI (No C compiler needed)
+
+If you want an interactive UI without Pixel/GLFW dependencies, use the lightweight web interface:
+
+```bash
+go run ./cmd/webui
+```
+
+Then open `http://localhost:8080`.
+
+This UI uses:
+- Go standard `net/http` backend (same engine package)
+- Plain HTML/CSS/JS frontend (no extra UI framework)
+
+So it avoids C-compiler-backed graphics libraries while keeping engine priority and low rendering overhead.
