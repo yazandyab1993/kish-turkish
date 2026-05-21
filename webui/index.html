@@ -56,6 +56,8 @@
     let flipped = false;
     let humanSide = 'white';
     let aiBusy = false;
+    let uiBusy = false;
+    let busyReason = '';
 
     async function api(path, options = {}) {
       const response = await fetch('/api/' + path, {
@@ -88,7 +90,28 @@
         ? (state.draw ? 'Draw' : `Winner: ${state.winner}`)
         : `Turn: ${state.turn}`;
       const capture = state.isTakeMap ? ' | Forced capture' : '';
-      document.getElementById('status').textContent = `${game}${capture} | ${role}`;
+      const busy = uiBusy ? ` | ${busyReason || 'Working...'}` : '';
+      document.getElementById('status').textContent = `${game}${capture} | ${role}${busy}`;
+    }
+
+
+    function setUiBusy(isBusy, reason = '') {
+      uiBusy = isBusy;
+      busyReason = isBusy ? reason : '';
+
+      const disabled = isBusy || aiBusy;
+      const ids = ['setDepth', 'aiBtn', 'resetBtn', 'depth'];
+      ids.forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.disabled = disabled;
+      });
+    }
+
+    function showError(error, context) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(context, error);
+      const status = document.getElementById('status');
+      if (status) status.textContent = `${context}: ${message}`;
     }
 
     function render() {
@@ -134,12 +157,17 @@
     async function maybeTriggerAI() {
       if (aiBusy || !state || state.gameOver || state.turn === humanSide) return;
       aiBusy = true;
+      setUiBusy(true, 'AI thinking...');
       try {
         state = await api('ai', { method: 'POST' });
         selected = -1;
         render();
+      } catch (error) {
+        showError(error, 'Failed to get AI move');
       } finally {
         aiBusy = false;
+        setUiBusy(false);
+        render();
       }
 
       if (!state.gameOver && state.turn !== humanSide) {
@@ -163,23 +191,61 @@
     }
 
     document.getElementById('setDepth').onclick = async () => {
-      const depth = Number(document.getElementById('depth').value || 7);
-      state = await api('depth', { method: 'POST', body: JSON.stringify({ depth }) });
-      render();
+      if (aiBusy || uiBusy || !state) return;
+
+      const depthInput = document.getElementById('depth');
+      const parsed = Number.parseInt(depthInput.value, 10);
+      const normalizedDepth = Number.isNaN(parsed) ? 7 : parsed;
+      const depth = Math.min(12, Math.max(1, normalizedDepth));
+      depthInput.value = String(depth);
+
+      if (depth === state.depth) {
+        render();
+        return;
+      }
+
+      setUiBusy(true, 'Applying depth...');
+      try {
+        state = await api('depth', { method: 'POST', body: JSON.stringify({ depth }) });
+        selected = -1;
+        render();
+      } catch (error) {
+        showError(error, 'Failed to apply depth');
+        return;
+      } finally {
+        setUiBusy(false);
+      }
+
       await maybeTriggerAI();
     };
 
     document.getElementById('aiBtn').onclick = async () => {
-      state = await api('ai', { method: 'POST' });
-      selected = -1;
-      render();
+      if (aiBusy || uiBusy) return;
+      setUiBusy(true, 'Running AI move...');
+      try {
+        state = await api('ai', { method: 'POST' });
+        selected = -1;
+        render();
+      } catch (error) {
+        showError(error, 'Failed to run AI move');
+      } finally {
+        setUiBusy(false);
+      }
       await maybeTriggerAI();
     };
 
     document.getElementById('resetBtn').onclick = async () => {
-      state = await api('reset', { method: 'POST' });
-      selected = -1;
-      render();
+      if (uiBusy) return;
+      setUiBusy(true, 'Resetting game...');
+      try {
+        state = await api('reset', { method: 'POST' });
+        selected = -1;
+        render();
+      } catch (error) {
+        showError(error, 'Failed to reset game');
+      } finally {
+        setUiBusy(false);
+      }
       await maybeTriggerAI();
     };
 
