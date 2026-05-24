@@ -1,7 +1,6 @@
 mod app;
 mod engine;
 mod opening_book;
-mod persistent_cache;
 
 use app::DraughtsApp;
 use eframe::egui;

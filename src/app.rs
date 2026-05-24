@@ -1,6 +1,5 @@
 use crate::engine::{Engine, EngineConfig, SearchReport};
 use crate::opening_book::{self, OpeningBook, Side};
-use crate::persistent_cache::PersistentAnalysisCache;
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use kish::{Action, Board, Game, GameStatus, Square, Team};
 use std::sync::{
@@ -85,13 +84,13 @@ pub struct DraughtsApp {
     last_move: Option<(Square, Square)>,
     move_log: Vec<MoveEntry>,
 
+    edit_mode: bool,
+    edit_board: Board,
+
     move_time_secs: u64,
     analysis_time_secs: u64,
     max_depth: u32,
     analysis_enabled: bool,
-    persistent_cache_enabled: bool,
-    show_cache_hits: bool,
-    analysis_cache: PersistentAnalysisCache,
     opening_book_enabled: bool,
     opening_book: Option<OpeningBook>,
 
@@ -131,13 +130,12 @@ impl DraughtsApp {
             selected: None,
             pending_choices: Vec::new(),
             move_log: Vec::new(),
+            edit_mode: false,
+            edit_board: *Game::new().board(),
             move_time_secs: 3,
             analysis_time_secs: 2,
             max_depth: 14,
             analysis_enabled: true,
-            persistent_cache_enabled: true,
-            show_cache_hits: true,
-            analysis_cache: PersistentAnalysisCache::load("analysis_cache.json"),
             opening_book_enabled: true,
             opening_book: Self::load_opening_book(),
             latest_report: None,
@@ -242,30 +240,6 @@ impl DraughtsApp {
         }
 
         let position = *self.game.board();
-        if purpose == JobPurpose::Analysis && self.persistent_cache_enabled {
-            let key = Engine::board_cache_key(position);
-            if let Some(entry) = self.analysis_cache.lookup(&key, self.max_depth) {
-                self.status_message = "Analysis loaded from persistent cache.".to_owned();
-                let cached_report = SearchReport {
-                    best_action: None,
-                    score_white: entry.score_white,
-                    completed_depth: entry.depth,
-                    nodes: 0,
-                    qnodes: 0,
-                    tt_hits: 0,
-                    cutoffs: 0,
-                    elapsed: Duration::from_millis(0),
-                    nps: 0,
-                    tt_entries: 0,
-                    principal_variation: entry.best_move.into_iter().collect(),
-                    forced_root: false,
-                };
-                self.latest_report = Some(cached_report);
-                self.latest_purpose = Some(JobPurpose::Analysis);
-                self.analyzed_position = Some(position);
-                return;
-            }
-        }
         self.next_job_id += 1;
         let id = self.next_job_id;
         let cancel = Arc::new(AtomicBool::new(false));
@@ -350,11 +324,6 @@ impl DraughtsApp {
                         } else if purpose == JobPurpose::Analysis {
                             self.analyzed_position = Some(position);
                             self.status_message = "Analysis completed.".to_owned();
-                            if self.persistent_cache_enabled {
-                                let key = Engine::board_cache_key(position);
-                                self.analysis_cache.upsert_root(key, &report);
-                                self.analysis_cache.flush_atomic();
-                            }
                         }
                     } else {
                         self.status_message = "Search stopped before a depth completed.".to_owned();
@@ -382,7 +351,7 @@ impl DraughtsApp {
     }
 
     fn apply_move(&mut self, action: Action, by_engine: bool) {
-        let board = *self.game.board();
+        let board = if self.edit_mode { self.edit_board } else { *self.game.board() };
         let notation = action.to_detailed(board.turn, &board.state).to_notation();
         let from = action.source(board.turn, board.friendly_pieces());
         let to = action.destination(board.turn, board.friendly_pieces());
@@ -444,7 +413,7 @@ impl DraughtsApp {
     }
 
     fn click_square(&mut self, square: Square) {
-        if !self.game_in_progress() || !self.is_human_turn() {
+        if self.edit_mode || !self.game_in_progress() || !self.is_human_turn() {
             return;
         }
         if self
@@ -572,6 +541,12 @@ impl DraughtsApp {
             if ui.button("New Game").clicked() {
                 self.new_game();
             }
+            if ui.button("Edit Board").clicked() {
+                self.cancel_active_job();
+                self.edit_mode = true;
+                self.edit_board = *self.game.board();
+                self.status_message = "Edit mode enabled. Click squares to cycle piece type.".to_owned();
+            }
             if ui.button("Undo Turn").clicked() {
                 self.undo();
             }
@@ -586,15 +561,6 @@ impl DraughtsApp {
         ui.add(egui::Slider::new(&mut self.max_depth, 4..=24).text("Maximum depth"));
         ui.checkbox(&mut self.analysis_enabled, "Live analysis on your turn");
         ui.checkbox(&mut self.opening_book_enabled, "Use opening book for engine moves");
-        ui.checkbox(
-            &mut self.persistent_cache_enabled,
-            "Enable persistent analysis cache",
-        );
-        ui.checkbox(&mut self.show_cache_hits, "Show cache hits");
-        if ui.button("Clear cache").clicked() {
-            self.analysis_cache.clear();
-            self.status_message = "Persistent analysis cache cleared.".to_owned();
-        }
         ui.add_enabled(
             self.analysis_enabled,
             egui::Slider::new(&mut self.analysis_time_secs, 1..=10).text("Analysis time (s)"),
@@ -664,13 +630,6 @@ impl DraughtsApp {
                 format_number(report.tt_entries as u64)
             ));
             ui.label(format!("Cutoffs: {}", format_number(report.cutoffs)));
-            if self.show_cache_hits {
-                ui.label(format!(
-                    "Persistent cache hits: {}",
-                    format_number(self.analysis_cache.hits)
-                ));
-            }
-
             ui.add_space(5.0);
             ui.label(egui::RichText::new("Principal variation").strong());
             if report.principal_variation.is_empty() {
@@ -692,6 +651,68 @@ impl DraughtsApp {
         );
     }
 
+
+    fn render_edit_controls(&mut self, ui: &mut egui::Ui) {
+        if !self.edit_mode {
+            return;
+        }
+        ui.separator();
+        ui.heading("Edit Board");
+        ui.label("Click any square to cycle: empty → white man → white king → black man → black king.");
+        ui.horizontal(|ui| {
+            ui.label("Side to move:");
+            ui.selectable_value(&mut self.edit_board.turn, Team::White, "White");
+            ui.selectable_value(&mut self.edit_board.turn, Team::Black, "Black");
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Apply Position").clicked() {
+                self.cancel_active_job();
+                self.game = Game::from_board(self.edit_board);
+                self.move_log.clear();
+                self.latest_report = None;
+                self.latest_purpose = None;
+                self.analyzed_position = None;
+                self.pending_choices.clear();
+                self.selected = None;
+                self.last_move = None;
+                self.edit_mode = false;
+                self.status_message = "Custom position applied. Engine can start from this setup.".to_owned();
+            }
+            if ui.button("Cancel Edit").clicked() {
+                self.edit_mode = false;
+                self.status_message = "Edit mode canceled.".to_owned();
+            }
+        });
+    }
+
+    fn cycle_edit_square(&mut self, square: Square) {
+        let mask = square.to_mask();
+        let white = self.edit_board.state.pieces[0] & mask != 0;
+        let black = self.edit_board.state.pieces[1] & mask != 0;
+        let king = self.edit_board.state.kings & mask != 0;
+
+        self.edit_board.state.pieces[0] &= !mask;
+        self.edit_board.state.pieces[1] &= !mask;
+        self.edit_board.state.kings &= !mask;
+
+        match (white, black, king) {
+            (false, false, false) => {
+                self.edit_board.state.pieces[0] |= mask;
+            }
+            (true, false, false) => {
+                self.edit_board.state.pieces[0] |= mask;
+                self.edit_board.state.kings |= mask;
+            }
+            (true, false, true) => {
+                self.edit_board.state.pieces[1] |= mask;
+            }
+            (false, true, false) => {
+                self.edit_board.state.pieces[1] |= mask;
+                self.edit_board.state.kings |= mask;
+            }
+            _ => {}
+        }
+    }
     fn render_eval_bar(&self, ui: &mut egui::Ui, score: i32) {
         let text = if score.abs() >= 900_000 {
             if score > 0 {
@@ -875,7 +896,11 @@ impl DraughtsApp {
                     Sense::click(),
                 );
                 if response.clicked() {
-                    self.click_square(square);
+                    if self.edit_mode {
+                        self.cycle_edit_square(square);
+                    } else {
+                        self.click_square(square);
+                    }
                 }
             }
         }
@@ -913,7 +938,9 @@ impl DraughtsApp {
 impl eframe::App for DraughtsApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_engine_messages();
-        self.request_next_work(ui.ctx());
+        if !self.edit_mode {
+            self.request_next_work(ui.ctx());
+        }
 
         ui.add_space(8.0);
         self.render_header(ui);
@@ -929,6 +956,7 @@ impl eframe::App for DraughtsApp {
 
             columns[1].vertical(|ui| {
                 self.render_controls(ui, &side_ctx);
+                self.render_edit_controls(ui);
                 self.render_analysis(ui);
                 self.render_moves(ui);
             });
