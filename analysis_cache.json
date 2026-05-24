@@ -1,0 +1,74 @@
+[
+  {
+    "board_key": "turn=White|pieces=0000000000ffff00-00ffff0000000000|kings=0000000000000000",
+    "depth": 8,
+    "score_white": 0,
+    "best_move": "d3-d4",
+    "bound": "Exact",
+    "timestamp_unix_secs": 1779648848
+  },
+  {
+    "board_key": "turn=White|pieces=0000000010efff00-00fffb0400000000|kings=0000000000000000",
+    "depth": 9,
+    "score_white": 8,
+    "best_move": "d3-d4",
+    "bound": "Exact",
+    "timestamp_unix_secs": 1779648986
+  },
+  {
+    "board_key": "turn=White|pieces=0000000018e7ff00-00ffdb2400000000|kings=0000000000000000",
+    "depth": 7,
+    "score_white": 8,
+    "best_move": "d2-d3",
+    "bound": "Exact",
+    "timestamp_unix_secs": 1779648887
+  },
+  {
+    "board_key": "turn=White|pieces=000000001ae5ff00-00fbdf2400000000|kings=0000000000000000",
+    "depth": 7,
+    "score_white": 8,
+    "best_move": "d2-d3",
+    "bound": "Exact",
+    "timestamp_unix_secs": 1779648894
+  },
+  {
+    "board_key": "turn=White|pieces=0000000030cfff00-00fff30c00000000|kings=0000000000000000",
+    "depth": 7,
+    "score_white": 8,
+    "best_move": "e2-e3",
+    "bound": "Exact",
+    "timestamp_unix_secs": 1779649052
+  },
+  {
+    "board_key": "turn=White|pieces=000000005b6bfc00-00ddab7c00000000|kings=0000000000000000",
+    "depth": 8,
+    "score_white": -130,
+    "best_move": "g4xg6xe6xc6xc8=K",
+    "bound": "Exact",
+    "timestamp_unix_secs": 1779648935
+  },
+  {
+    "board_key": "turn=White|pieces=000000009b64ff00-00dbff2800000000|kings=0000000000000000",
+    "depth": 6,
+    "score_white": 4,
+    "best_move": "d2-d3",
+    "bound": "Exact",
+    "timestamp_unix_secs": 1779648904
+  },
+  {
+    "board_key": "turn=White|pieces=000000009b68ff00-00dbfb2c00000000|kings=0000000000000000",
+    "depth": 6,
+    "score_white": -2,
+    "best_move": "e2-e3",
+    "bound": "Exact",
+    "timestamp_unix_secs": 1779648913
+  },
+  {
+    "board_key": "turn=White|pieces=000000009b6bfc00-00ddbb6c00000000|kings=0000000000000000",
+    "depth": 6,
+    "score_white": -2,
+    "best_move": "e2-e3",
+    "bound": "Exact",
+    "timestamp_unix_secs": 1779648929
+  }
+]
