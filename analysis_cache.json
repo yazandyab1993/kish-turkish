@@ -1,0 +1,10 @@
+[
+  {
+    "board_key": "turn=White|pieces=0000000000ffff00-00ffff0000000000|kings=0000000000000000",
+    "depth": 8,
+    "score_white": 0,
+    "best_move": "d3-d4",
+    "bound": "Exact",
+    "timestamp_unix_secs": 1779651856
+  }
+]

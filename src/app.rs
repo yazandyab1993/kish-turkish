@@ -207,7 +207,7 @@ impl DraughtsApp {
         }
         let row = 8 - rank;
         let index = row * 8 + file_idx;
-        Square::try_from_usize(index).ok()
+        Square::try_from_usize(index)
     }
     fn new_game(&mut self) {
         self.cancel_active_job();
