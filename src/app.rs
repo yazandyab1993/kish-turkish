@@ -86,6 +86,7 @@ pub struct DraughtsApp {
 
     edit_mode: bool,
     edit_board: Board,
+    edit_selected: Option<Square>,
 
     move_time_secs: u64,
     analysis_time_secs: u64,
@@ -132,6 +133,7 @@ impl DraughtsApp {
             move_log: Vec::new(),
             edit_mode: false,
             edit_board: *Game::new().board(),
+            edit_selected: None,
             move_time_secs: 3,
             analysis_time_secs: 2,
             max_depth: 14,
@@ -545,7 +547,8 @@ impl DraughtsApp {
                 self.cancel_active_job();
                 self.edit_mode = true;
                 self.edit_board = *self.game.board();
-                self.status_message = "Edit mode enabled. Click squares to cycle piece type.".to_owned();
+                self.edit_selected = None;
+                self.status_message = "Edit mode enabled. Select a piece then click a target square to move it.".to_owned();
             }
             if ui.button("Undo Turn").clicked() {
                 self.undo();
@@ -658,11 +661,25 @@ impl DraughtsApp {
         }
         ui.separator();
         ui.heading("Edit Board");
-        ui.label("Click any square to cycle: empty → white man → white king → black man → black king.");
+        ui.label("Select a piece, then click another square to move it. Use piece tools for add/remove and promotions.");
+        ui.label("Tip: click selected square again to clear it.");
         ui.horizontal(|ui| {
             ui.label("Side to move:");
             ui.selectable_value(&mut self.edit_board.turn, Team::White, "White");
             ui.selectable_value(&mut self.edit_board.turn, Team::Black, "Black");
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Clear Board").clicked() {
+                self.edit_board.state.pieces = [0, 0];
+                self.edit_board.state.kings = 0;
+                self.edit_selected = None;
+                self.status_message = "Board cleared.".to_owned();
+            }
+            if ui.button("Reset Start Position").clicked() {
+                self.edit_board = *Game::new().board();
+                self.edit_selected = None;
+                self.status_message = "Start position restored in edit mode.".to_owned();
+            }
         });
         ui.horizontal(|ui| {
             if ui.button("Apply Position").clicked() {
@@ -676,43 +693,73 @@ impl DraughtsApp {
                 self.selected = None;
                 self.last_move = None;
                 self.edit_mode = false;
+                self.edit_selected = None;
                 self.status_message = "Custom position applied. Engine can start from this setup.".to_owned();
             }
             if ui.button("Cancel Edit").clicked() {
                 self.edit_mode = false;
+                self.edit_selected = None;
                 self.status_message = "Edit mode canceled.".to_owned();
             }
         });
     }
 
-    fn cycle_edit_square(&mut self, square: Square) {
+    fn move_edit_piece(&mut self, from: Square, to: Square) {
+        if from == to {
+            self.edit_selected = None;
+            return;
+        }
+
+        let from_mask = from.to_mask();
+        let to_mask = to.to_mask();
+
+        let white = self.edit_board.state.pieces[0] & from_mask != 0;
+        let black = self.edit_board.state.pieces[1] & from_mask != 0;
+        let king = self.edit_board.state.kings & from_mask != 0;
+
+        if !white && !black {
+            self.edit_selected = None;
+            return;
+        }
+
+        self.edit_board.state.pieces[0] &= !from_mask;
+        self.edit_board.state.pieces[1] &= !from_mask;
+        self.edit_board.state.kings &= !from_mask;
+
+        self.edit_board.state.pieces[0] &= !to_mask;
+        self.edit_board.state.pieces[1] &= !to_mask;
+        self.edit_board.state.kings &= !to_mask;
+
+        if white {
+            self.edit_board.state.pieces[0] |= to_mask;
+        } else if black {
+            self.edit_board.state.pieces[1] |= to_mask;
+        }
+
+        if king {
+            self.edit_board.state.kings |= to_mask;
+        }
+
+        self.edit_selected = Some(to);
+    }
+
+    fn click_edit_square(&mut self, square: Square) {
+        if let Some(selected) = self.edit_selected {
+            if selected == square {
+                self.edit_selected = None;
+                return;
+            }
+            self.move_edit_piece(selected, square);
+            return;
+        }
+
         let mask = square.to_mask();
-        let white = self.edit_board.state.pieces[0] & mask != 0;
-        let black = self.edit_board.state.pieces[1] & mask != 0;
-        let king = self.edit_board.state.kings & mask != 0;
-
-        self.edit_board.state.pieces[0] &= !mask;
-        self.edit_board.state.pieces[1] &= !mask;
-        self.edit_board.state.kings &= !mask;
-
-        match (white, black, king) {
-            (false, false, false) => {
-                self.edit_board.state.pieces[0] |= mask;
-            }
-            (true, false, false) => {
-                self.edit_board.state.pieces[0] |= mask;
-                self.edit_board.state.kings |= mask;
-            }
-            (true, false, true) => {
-                self.edit_board.state.pieces[1] |= mask;
-            }
-            (false, true, false) => {
-                self.edit_board.state.pieces[1] |= mask;
-                self.edit_board.state.kings |= mask;
-            }
-            _ => {}
+        let occupied = (self.edit_board.state.pieces[0] | self.edit_board.state.pieces[1]) & mask != 0;
+        if occupied {
+            self.edit_selected = Some(square);
         }
     }
+
     fn render_eval_bar(&self, ui: &mut egui::Ui, score: i32) {
         let text = if score.abs() >= 900_000 {
             if score > 0 {
@@ -826,7 +873,7 @@ impl DraughtsApp {
                     );
                 }
 
-                if self.selected == Some(square) {
+                if self.selected == Some(square) || (self.edit_mode && self.edit_selected == Some(square)) {
                     painter.rect_filled(
                         rect.shrink(cell * 0.03),
                         4.0,
@@ -897,7 +944,7 @@ impl DraughtsApp {
                 );
                 if response.clicked() {
                     if self.edit_mode {
-                        self.cycle_edit_square(square);
+                        self.click_edit_square(square);
                     } else {
                         self.click_square(square);
                     }
