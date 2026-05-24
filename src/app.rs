@@ -1,4 +1,5 @@
 use crate::engine::{Engine, EngineConfig, SearchReport};
+use crate::opening_book::{self, OpeningBook, Side};
 use crate::persistent_cache::PersistentAnalysisCache;
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use kish::{Action, Board, Game, GameStatus, Square, Team};
@@ -91,6 +92,8 @@ pub struct DraughtsApp {
     persistent_cache_enabled: bool,
     show_cache_hits: bool,
     analysis_cache: PersistentAnalysisCache,
+    opening_book_enabled: bool,
+    opening_book: Option<OpeningBook>,
 
     latest_report: Option<SearchReport>,
     latest_purpose: Option<JobPurpose>,
@@ -135,6 +138,8 @@ impl DraughtsApp {
             persistent_cache_enabled: true,
             show_cache_hits: true,
             analysis_cache: PersistentAnalysisCache::load("analysis_cache.json"),
+            opening_book_enabled: true,
+            opening_book: Self::load_opening_book(),
             latest_report: None,
             latest_purpose: None,
             analyzed_position: None,
@@ -146,6 +151,64 @@ impl DraughtsApp {
         }
     }
 
+
+    fn load_opening_book() -> Option<OpeningBook> {
+        let content = std::fs::read_to_string("opening_book.json").ok()?;
+        serde_json::from_str::<OpeningBook>(&content).ok()
+    }
+
+    fn try_opening_book_action(&self, board: Board) -> Option<Action> {
+        if !self.opening_book_enabled {
+            return None;
+        }
+        let book = self.opening_book.as_ref()?;
+        let side = if board.turn == Team::White { Side::White } else { Side::Black };
+        let raw = format!("{}", board.state);
+        let rows: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        if rows.len() != 8 {
+            return None;
+        }
+
+        let mut converted = [['-'; 8]; 8];
+        for (r, row) in rows.iter().enumerate() {
+            let chars: Vec<char> = row.chars().filter(|ch| !ch.is_whitespace()).collect();
+            if chars.len() != 8 {
+                return None;
+            }
+            for (c, ch) in chars.into_iter().enumerate() {
+                converted[r][c] = match ch {
+                    'w' | 'W' | 'b' | 'B' | '-' => ch,
+                    _ => return None,
+                };
+            }
+        }
+
+        let rec = opening_book::get_book_move(book, &converted, side, "best")?;
+        let source = Self::square_from_name(&rec.from)?;
+        let target = Self::square_from_name(&rec.to)?;
+
+        board.actions().into_iter().find(|action| {
+            action.source(board.turn, board.friendly_pieces()) == source
+                && action.destination(board.turn, board.friendly_pieces()) == target
+        })
+    }
+
+    fn square_from_name(name: &str) -> Option<Square> {
+        let mut chars = name.chars();
+        let file = chars.next()?;
+        let rank_ch = chars.next()?;
+        if chars.next().is_some() {
+            return None;
+        }
+        let file_idx = (file as u8).checked_sub(b'a')? as usize;
+        let rank = rank_ch.to_digit(10)? as usize;
+        if file_idx >= 8 || !(1..=8).contains(&rank) {
+            return None;
+        }
+        let row = 8 - rank;
+        let index = row * 8 + file_idx;
+        Square::try_from_usize(index)
+    }
     fn new_game(&mut self) {
         self.cancel_active_job();
         self.game = Game::new();
@@ -307,7 +370,12 @@ impl DraughtsApp {
         }
 
         if !self.is_human_turn() {
-            self.spawn_search(ctx, JobPurpose::EngineMove);
+            if let Some(action) = self.try_opening_book_action(*self.game.board()) {
+                self.apply_move(action, true);
+                self.status_message = "Engine played from opening book.".to_owned();
+            } else {
+                self.spawn_search(ctx, JobPurpose::EngineMove);
+            }
         } else if self.analysis_enabled && self.analyzed_position != Some(*self.game.board()) {
             self.spawn_search(ctx, JobPurpose::Analysis);
         }
@@ -517,6 +585,7 @@ impl DraughtsApp {
         ui.add(egui::Slider::new(&mut self.move_time_secs, 1..=15).text("Move time (s)"));
         ui.add(egui::Slider::new(&mut self.max_depth, 4..=24).text("Maximum depth"));
         ui.checkbox(&mut self.analysis_enabled, "Live analysis on your turn");
+        ui.checkbox(&mut self.opening_book_enabled, "Use opening book for engine moves");
         ui.checkbox(
             &mut self.persistent_cache_enabled,
             "Enable persistent analysis cache",
