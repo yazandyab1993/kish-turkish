@@ -370,6 +370,13 @@ impl Engine {
         }
     }
 
+    pub fn board_cache_key(board: Board) -> String {
+        format!(
+            "turn={:?}|pieces={:016x}-{:016x}|kings={:016x}",
+            board.turn, board.state.pieces[0], board.state.pieces[1], board.state.kings
+        )
+    }
+
     pub fn evaluate_white_static(board: Board) -> i32 {
         let white = board.state.pieces[0];
         let black = board.state.pieces[1];

@@ -1,5 +1,6 @@
 mod app;
 mod engine;
+mod persistent_cache;
 
 use app::DraughtsApp;
 use eframe::egui;
