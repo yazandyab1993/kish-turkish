@@ -58,6 +58,7 @@ pub struct SearchReport {
     pub nps: u64,
     pub tt_entries: usize,
     pub principal_variation: Vec<String>,
+    pub forced_root: bool,
 }
 
 #[derive(Debug)]
@@ -146,6 +147,7 @@ impl Engine {
             nps: (self.nodes as f64 / secs) as u64,
             tt_entries: self.tt.len(),
             principal_variation: self.extract_pv(self.root_board, depth),
+            forced_root: Self::is_forced_capture_position(self.root_board),
         }
     }
 
@@ -156,6 +158,23 @@ impl Engine {
         let mut actions = board.actions();
         if actions.is_empty() {
             return Err(SearchInterrupted);
+        }
+
+        let forced_capture = Self::is_forced_capture_actions(board, &actions);
+        if actions.len() == 1 && forced_capture {
+            let only_action = actions[0];
+            let child = board.apply(&only_action).swap_turn();
+            let score = -self.negamax(child, depth.saturating_sub(1), -INF, INF, 1)?;
+            self.store_tt(
+                board,
+                TTEntry {
+                    depth,
+                    score,
+                    bound: Bound::Exact,
+                    best_action: Some(only_action),
+                },
+            );
+            return Ok((score, only_action));
         }
 
         let tt_move = self.tt.get(&board).and_then(|entry| entry.best_action);
@@ -170,7 +189,11 @@ impl Engine {
 
             let child = board.apply(&action).swap_turn();
             let score = -self.negamax(child, depth.saturating_sub(1), -INF, INF, 1)?;
-            let tie_break = self.root_move_bonus(board, &action);
+            let tie_break = if forced_capture {
+                action.capture_count(board.turn) as i32
+            } else {
+                self.root_move_bonus(board, &action)
+            };
 
             if score > best_score || (score == best_score && tie_break > best_tie_break) {
                 best_score = score;
@@ -233,6 +256,7 @@ impl Engine {
         if actions.is_empty() {
             return Ok(-MATE_SCORE + ply as i32);
         }
+        let forced_capture = Self::is_forced_capture_actions(board, &actions);
         self.order_moves(board, &mut actions, tt_move);
 
         let mut best_score = -INF;
@@ -240,7 +264,8 @@ impl Engine {
 
         for action in actions {
             let child = board.apply(&action).swap_turn();
-            let score = -self.negamax(child, depth - 1, -beta, -alpha, ply + 1)?;
+            let next_depth = if forced_capture { depth } else { depth - 1 };
+            let score = -self.negamax(child, next_depth, -beta, -alpha, ply + 1)?;
 
             if score > best_score {
                 best_score = score;
@@ -417,7 +442,9 @@ impl Engine {
     }
 
     fn order_moves(&self, board: Board, actions: &mut Vec<Action>, preferred: Option<Action>) {
-        actions.sort_unstable_by_key(|action| Reverse(self.move_order_score(board, action, preferred)));
+        actions.sort_unstable_by_key(|action| {
+            Reverse(self.move_order_score(board, action, preferred))
+        });
     }
 
     fn move_order_score(&self, board: Board, action: &Action, preferred: Option<Action>) -> i32 {
@@ -447,6 +474,18 @@ impl Engine {
             Team::Black => 7 - row,
         };
         score
+    }
+
+    fn is_forced_capture_position(board: Board) -> bool {
+        let actions = board.actions();
+        Self::is_forced_capture_actions(board, &actions)
+    }
+
+    fn is_forced_capture_actions(board: Board, actions: &[Action]) -> bool {
+        actions
+            .first()
+            .map(|action| action.is_capture(board.turn))
+            .unwrap_or(false)
     }
 
     fn extract_pv(&self, mut board: Board, max_depth: u32) -> Vec<String> {

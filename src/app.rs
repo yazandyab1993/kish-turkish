@@ -50,7 +50,6 @@ enum JobPurpose {
 struct ActiveJob {
     id: u64,
     purpose: JobPurpose,
-    position: Board,
     cancel: Arc<AtomicBool>,
 }
 
@@ -110,10 +109,10 @@ impl DraughtsApp {
         visuals.widgets.hovered.bg_fill = Color32::from_rgb(37, 57, 68);
         cc.egui_ctx.set_visuals(visuals);
 
-        let mut style = (*cc.egui_ctx.style()).clone();
+        let mut style = (*cc.egui_ctx.global_style()).clone();
         style.spacing.item_spacing = Vec2::new(10.0, 8.0);
         style.spacing.button_padding = Vec2::new(12.0, 7.0);
-        cc.egui_ctx.set_style(style);
+        cc.egui_ctx.set_global_style(style);
 
         let (tx, rx) = mpsc::channel();
 
@@ -137,7 +136,6 @@ impl DraughtsApp {
             rx,
             active_job: None,
             next_job_id: 0,
-            
         }
     }
 
@@ -191,7 +189,6 @@ impl DraughtsApp {
         self.active_job = Some(ActiveJob {
             id,
             purpose,
-            position,
             cancel,
         });
 
@@ -224,7 +221,11 @@ impl DraughtsApp {
     fn poll_engine_messages(&mut self) {
         while let Ok(message) = self.rx.try_recv() {
             match message {
-                EngineMessage::Progress { id, purpose, report } => {
+                EngineMessage::Progress {
+                    id,
+                    purpose,
+                    report,
+                } => {
                     if self.active_job.as_ref().map(|job| job.id) == Some(id) {
                         self.latest_report = Some(report);
                         self.latest_purpose = Some(purpose);
@@ -375,9 +376,9 @@ impl DraughtsApp {
             }
         }
 
-        let can_select = legal.iter().any(|action| {
-            action.source(board.turn, board.friendly_pieces()) == square
-        });
+        let can_select = legal
+            .iter()
+            .any(|action| action.source(board.turn, board.friendly_pieces()) == square);
 
         if can_select {
             self.selected = Some(square);
@@ -416,15 +417,13 @@ impl DraughtsApp {
             ui.heading("KISH  ·  TURKISH DRAUGHTS STUDIO");
             ui.add_space(18.0);
             let turn = self.game.turn();
-            ui.label(
-                egui::RichText::new(format!("Turn: {turn}"))
-                    .strong()
-                    .color(if turn == Team::White {
-                        Color32::from_rgb(231, 232, 235)
-                    } else {
-                        Color32::from_rgb(168, 179, 194)
-                    }),
-            );
+            ui.label(egui::RichText::new(format!("Turn: {turn}")).strong().color(
+                if turn == Team::White {
+                    Color32::from_rgb(231, 232, 235)
+                } else {
+                    Color32::from_rgb(168, 179, 194)
+                },
+            ));
             ui.separator();
             ui.label(&self.status_message);
         });
@@ -438,10 +437,26 @@ impl DraughtsApp {
         egui::ComboBox::from_label("Mode / your colour")
             .selected_text(self.mode.label())
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.mode, PlayMode::HumanWhite, PlayMode::HumanWhite.label());
-                ui.selectable_value(&mut self.mode, PlayMode::HumanBlack, PlayMode::HumanBlack.label());
-                ui.selectable_value(&mut self.mode, PlayMode::TwoPlayers, PlayMode::TwoPlayers.label());
-                ui.selectable_value(&mut self.mode, PlayMode::WatchEngines, PlayMode::WatchEngines.label());
+                ui.selectable_value(
+                    &mut self.mode,
+                    PlayMode::HumanWhite,
+                    PlayMode::HumanWhite.label(),
+                );
+                ui.selectable_value(
+                    &mut self.mode,
+                    PlayMode::HumanBlack,
+                    PlayMode::HumanBlack.label(),
+                );
+                ui.selectable_value(
+                    &mut self.mode,
+                    PlayMode::TwoPlayers,
+                    PlayMode::TwoPlayers.label(),
+                );
+                ui.selectable_value(
+                    &mut self.mode,
+                    PlayMode::WatchEngines,
+                    PlayMode::WatchEngines.label(),
+                );
             });
 
         if old_mode != self.mode {
@@ -559,17 +574,25 @@ impl DraughtsApp {
 
     fn render_eval_bar(&self, ui: &mut egui::Ui, score: i32) {
         let text = if score.abs() >= 900_000 {
-            if score > 0 { "White winning".to_owned() } else { "Black winning".to_owned() }
+            if score > 0 {
+                "White winning".to_owned()
+            } else {
+                "Black winning".to_owned()
+            }
         } else {
             format!("{:+.2}", score as f32 / 100.0)
         };
 
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::hover());
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::hover());
         let painter = ui.painter();
         painter.rect_filled(rect, 6.0, Color32::from_rgb(36, 42, 53));
 
         let normalized = ((score as f32 / 600.0).clamp(-1.0, 1.0) + 1.0) / 2.0;
-        let fill_rect = Rect::from_min_max(rect.min, Pos2::new(rect.left() + rect.width() * normalized, rect.bottom()));
+        let fill_rect = Rect::from_min_max(
+            rect.min,
+            Pos2::new(rect.left() + rect.width() * normalized, rect.bottom()),
+        );
         painter.rect_filled(fill_rect, 6.0, Color32::from_rgb(218, 220, 222));
         painter.text(
             rect.center(),
@@ -651,12 +674,23 @@ impl DraughtsApp {
 
                 painter.rect_filled(rect, 0.0, base);
 
-                if legal_sources.contains(&square) && self.selected.is_none() && self.is_human_turn() {
-                    painter.circle_filled(rect.center(), cell * 0.07, Color32::from_rgba_premultiplied(45, 120, 112, 150));
+                if legal_sources.contains(&square)
+                    && self.selected.is_none()
+                    && self.is_human_turn()
+                {
+                    painter.circle_filled(
+                        rect.center(),
+                        cell * 0.07,
+                        Color32::from_rgba_premultiplied(45, 120, 112, 150),
+                    );
                 }
 
                 if self.selected == Some(square) {
-                    painter.rect_filled(rect.shrink(cell * 0.03), 4.0, Color32::from_rgba_premultiplied(56, 166, 153, 90));
+                    painter.rect_filled(
+                        rect.shrink(cell * 0.03),
+                        4.0,
+                        Color32::from_rgba_premultiplied(56, 166, 153, 90),
+                    );
                 }
 
                 if targets.contains(&square) {
@@ -667,22 +701,22 @@ impl DraughtsApp {
                     );
                 }
                 if let Some((from, to)) = self.last_move {
-                if square == from {
-                    painter.rect_filled(
-                        rect.shrink(cell * 0.04),
-                        6.0,
-                        Color32::from_rgba_premultiplied(255, 210, 90, 95),
-                    );
-                }
+                    if square == from {
+                        painter.rect_filled(
+                            rect.shrink(cell * 0.04),
+                            6.0,
+                            Color32::from_rgba_premultiplied(255, 210, 90, 95),
+                        );
+                    }
 
-                if square == to {
-                    painter.rect_filled(
-                        rect.shrink(cell * 0.04),
-                        6.0,
-                        Color32::from_rgba_premultiplied(80, 210, 160, 110),
-                    );
+                    if square == to {
+                        painter.rect_filled(
+                            rect.shrink(cell * 0.04),
+                            6.0,
+                            Color32::from_rgba_premultiplied(80, 210, 160, 110),
+                        );
+                    }
                 }
-            }
                 let mask = square.to_mask();
                 let white_piece = board.state.pieces[0] & mask != 0;
                 let black_piece = board.state.pieces[1] & mask != 0;
@@ -733,14 +767,20 @@ impl DraughtsApp {
             let rank = rank_row + 1;
 
             painter.text(
-                Pos2::new(board_rect.left() + i as f32 * cell + 6.0, board_rect.bottom() - 6.0),
+                Pos2::new(
+                    board_rect.left() + i as f32 * cell + 6.0,
+                    board_rect.bottom() - 6.0,
+                ),
                 egui::Align2::LEFT_BOTTOM,
                 file.to_string(),
                 FontId::proportional(12.0),
                 Color32::from_rgb(238, 225, 201),
             );
             painter.text(
-                Pos2::new(board_rect.left() + 6.0, board_rect.top() + i as f32 * cell + 6.0),
+                Pos2::new(
+                    board_rect.left() + 6.0,
+                    board_rect.top() + i as f32 * cell + 6.0,
+                ),
                 egui::Align2::LEFT_TOP,
                 rank.to_string(),
                 FontId::proportional(12.0),
