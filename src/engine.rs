@@ -129,6 +129,7 @@ impl Engine {
     fn make_report(&self, depth: u32, score_from_root_turn: i32, action: Action) -> SearchReport {
         let elapsed = self.start.elapsed();
         let secs = elapsed.as_secs_f64().max(0.000_001);
+        let total_nodes = self.nodes + self.qnodes;
         let score_white = if self.root_board.turn == Team::White {
             score_from_root_turn
         } else {
@@ -144,7 +145,7 @@ impl Engine {
             tt_hits: self.tt_hits,
             cutoffs: self.cutoffs,
             elapsed,
-            nps: (self.nodes as f64 / secs) as u64,
+            nps: (total_nodes as f64 / secs) as u64,
             tt_entries: self.tt.len(),
             principal_variation: self.extract_pv(self.root_board, depth),
             forced_root: Self::is_forced_capture_position(self.root_board),
@@ -256,7 +257,6 @@ impl Engine {
         if actions.is_empty() {
             return Ok(-MATE_SCORE + ply as i32);
         }
-        let forced_capture = Self::is_forced_capture_actions(board, &actions);
         self.order_moves(board, &mut actions, tt_move);
 
         let mut best_score = -INF;
@@ -264,8 +264,7 @@ impl Engine {
 
         for action in actions {
             let child = board.apply(&action).swap_turn();
-            let next_depth = if forced_capture { depth } else { depth - 1 };
-            let score = -self.negamax(child, next_depth, -beta, -alpha, ply + 1)?;
+            let score = -self.negamax(child, depth - 1, -beta, -alpha, ply + 1)?;
 
             if score > best_score {
                 best_score = score;
