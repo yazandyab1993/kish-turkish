@@ -1,3 +1,4 @@
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
@@ -260,7 +261,8 @@ pub fn get_book_move(book: &OpeningBook, board: &Board, side: Side, strategy: &s
         "random_weighted" => {
             let sum: u32 = moves.iter().map(|m| m.count).sum();
             if sum == 0 { return Some(moves[0].r#move.clone()); }
-            let mut state = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_nanos() % sum;
+            let mut rng = rand::thread_rng();
+            let mut state: u32 = rng.gen_range(0..sum);
             for m in moves {
                 if state < m.count { return Some(m.r#move.clone()); }
                 state -= m.count;
