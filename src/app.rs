@@ -125,6 +125,31 @@ struct MoveEntry {
     by_engine: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EditTool {
+    Move,
+    AddWhiteMan,
+    AddBlackMan,
+    AddWhiteKing,
+    AddBlackKing,
+    Remove,
+    ToggleKing,
+}
+
+impl EditTool {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Move => "Move",
+            Self::AddWhiteMan => "+ White",
+            Self::AddBlackMan => "+ Black",
+            Self::AddWhiteKing => "+ White King",
+            Self::AddBlackKing => "+ Black King",
+            Self::Remove => "Remove",
+            Self::ToggleKing => "Toggle King",
+        }
+    }
+}
+
 pub struct DraughtsApp {
     game: Game,
     mode: PlayMode,
@@ -137,6 +162,9 @@ pub struct DraughtsApp {
     edit_mode: bool,
     edit_board: Board,
     edit_selected: Option<Square>,
+    edit_tool: EditTool,
+    edit_undo_stack: Vec<Board>,
+    edit_redo_stack: Vec<Board>,
 
     move_time_secs: u64,
     analysis_time_secs: u64,
@@ -205,6 +233,9 @@ impl DraughtsApp {
             edit_mode: false,
             edit_board: *Game::new().board(),
             edit_selected: None,
+            edit_tool: EditTool::Move,
+            edit_undo_stack: Vec::new(),
+            edit_redo_stack: Vec::new(),
             move_time_secs: 3,
             analysis_time_secs: 2,
             max_depth: 14,
@@ -734,9 +765,11 @@ impl DraughtsApp {
                 self.edit_mode = true;
                 self.edit_board = *self.game.board();
                 self.edit_selected = None;
+                self.edit_tool = EditTool::Move;
+                self.edit_undo_stack.clear();
+                self.edit_redo_stack.clear();
                 self.status_message =
-                    "Edit mode enabled. Select a piece then click a target square to move it."
-                        .to_owned();
+                    "Edit mode enabled. Use tools to move/add/remove pieces.".to_owned();
             }
             if ui.button("Undo Turn").clicked() {
                 self.undo();
@@ -944,6 +977,19 @@ impl DraughtsApp {
         ui.heading("Edit Board");
         ui.label("Select a piece, then click another square to move it. Use piece tools for add/remove and promotions.");
         ui.label("Tip: click selected square again to clear it.");
+        ui.horizontal_wrapped(|ui| {
+            for tool in [
+                EditTool::Move,
+                EditTool::AddWhiteMan,
+                EditTool::AddBlackMan,
+                EditTool::AddWhiteKing,
+                EditTool::AddBlackKing,
+                EditTool::Remove,
+                EditTool::ToggleKing,
+            ] {
+                ui.selectable_value(&mut self.edit_tool, tool, tool.label());
+            }
+        });
         ui.horizontal(|ui| {
             ui.label("Side to move:");
             ui.selectable_value(&mut self.edit_board.turn, Team::White, "White");
@@ -951,19 +997,33 @@ impl DraughtsApp {
         });
         ui.horizontal(|ui| {
             if ui.button("Clear Board").clicked() {
+                self.push_edit_undo();
                 self.edit_board.state.pieces = [0, 0];
                 self.edit_board.state.kings = 0;
                 self.edit_selected = None;
                 self.status_message = "Board cleared.".to_owned();
             }
             if ui.button("Reset Start Position").clicked() {
+                self.push_edit_undo();
                 self.edit_board = *Game::new().board();
                 self.edit_selected = None;
                 self.status_message = "Start position restored in edit mode.".to_owned();
             }
         });
         ui.horizontal(|ui| {
+            if ui.button("Undo Edit").clicked() {
+                self.undo_edit();
+            }
+            if ui.button("Redo Edit").clicked() {
+                self.redo_edit();
+            }
+        });
+        ui.horizontal(|ui| {
             if ui.button("Apply Position").clicked() {
+                if let Err(err) = self.validate_edit_board() {
+                    self.status_message = err;
+                    return;
+                }
                 self.cancel_active_job();
                 self.game = Game::from_board(self.edit_board);
                 self.move_log.clear();
@@ -975,15 +1035,72 @@ impl DraughtsApp {
                 self.last_move = None;
                 self.edit_mode = false;
                 self.edit_selected = None;
+                self.edit_undo_stack.clear();
+                self.edit_redo_stack.clear();
                 self.status_message =
                     "Custom position applied. Engine can start from this setup.".to_owned();
             }
             if ui.button("Cancel Edit").clicked() {
                 self.edit_mode = false;
                 self.edit_selected = None;
+                self.edit_undo_stack.clear();
+                self.edit_redo_stack.clear();
                 self.status_message = "Edit mode canceled.".to_owned();
             }
         });
+    }
+
+    fn is_playable_square(square: Square) -> bool {
+        let index = square.to_usize();
+        let row = index / 8;
+        let col = index % 8;
+        (row + col) % 2 == 1
+    }
+
+    fn push_edit_undo(&mut self) {
+        self.edit_undo_stack.push(self.edit_board);
+        self.edit_redo_stack.clear();
+    }
+
+    fn undo_edit(&mut self) {
+        if let Some(previous) = self.edit_undo_stack.pop() {
+            self.edit_redo_stack.push(self.edit_board);
+            self.edit_board = previous;
+            self.edit_selected = None;
+            self.status_message = "Edit undo applied.".to_owned();
+        }
+    }
+
+    fn redo_edit(&mut self) {
+        if let Some(next) = self.edit_redo_stack.pop() {
+            self.edit_undo_stack.push(self.edit_board);
+            self.edit_board = next;
+            self.edit_selected = None;
+            self.status_message = "Edit redo applied.".to_owned();
+        }
+    }
+
+    fn validate_edit_board(&self) -> Result<(), String> {
+        let white = self.edit_board.state.pieces[0];
+        let black = self.edit_board.state.pieces[1];
+        let kings = self.edit_board.state.kings;
+        if white & black != 0 {
+            return Err("Invalid position: overlapping white and black pieces.".to_owned());
+        }
+        if kings & !(white | black) != 0 {
+            return Err("Invalid position: king bits must belong to existing pieces.".to_owned());
+        }
+        let all = white | black;
+        for i in 0..64usize {
+            let square = Square::try_from_usize(i).expect("valid board index");
+            let mask = square.to_mask();
+            if all & mask != 0 && !Self::is_playable_square(square) {
+                return Err(
+                    "Invalid position: pieces must be on playable (dark) squares.".to_owned(),
+                );
+            }
+        }
+        Ok(())
     }
 
     fn move_edit_piece(&mut self, from: Square, to: Square) {
@@ -1003,6 +1120,11 @@ impl DraughtsApp {
             self.edit_selected = None;
             return;
         }
+        if !Self::is_playable_square(to) {
+            self.status_message = "Cannot place pieces on light squares.".to_owned();
+            return;
+        }
+        self.push_edit_undo();
 
         self.edit_board.state.pieces[0] &= !from_mask;
         self.edit_board.state.pieces[1] &= !from_mask;
@@ -1026,6 +1148,14 @@ impl DraughtsApp {
     }
 
     fn click_edit_square(&mut self, square: Square) {
+        if !Self::is_playable_square(square) {
+            self.status_message = "Only dark squares can hold pieces.".to_owned();
+            return;
+        }
+        if self.edit_tool != EditTool::Move {
+            self.apply_edit_tool(square);
+            return;
+        }
         if let Some(selected) = self.edit_selected {
             if selected == square {
                 self.edit_selected = None;
@@ -1041,6 +1171,36 @@ impl DraughtsApp {
         if occupied {
             self.edit_selected = Some(square);
         }
+    }
+
+    fn apply_edit_tool(&mut self, square: Square) {
+        self.push_edit_undo();
+        let mask = square.to_mask();
+        self.edit_board.state.pieces[0] &= !mask;
+        self.edit_board.state.pieces[1] &= !mask;
+        self.edit_board.state.kings &= !mask;
+        match self.edit_tool {
+            EditTool::AddWhiteMan => self.edit_board.state.pieces[0] |= mask,
+            EditTool::AddBlackMan => self.edit_board.state.pieces[1] |= mask,
+            EditTool::AddWhiteKing => {
+                self.edit_board.state.pieces[0] |= mask;
+                self.edit_board.state.kings |= mask;
+            }
+            EditTool::AddBlackKing => {
+                self.edit_board.state.pieces[1] |= mask;
+                self.edit_board.state.kings |= mask;
+            }
+            EditTool::Remove => {}
+            EditTool::ToggleKing => {
+                let occupied =
+                    (self.edit_board.state.pieces[0] | self.edit_board.state.pieces[1]) & mask != 0;
+                if occupied {
+                    self.edit_board.state.kings ^= mask;
+                }
+            }
+            EditTool::Move => {}
+        }
+        self.edit_selected = None;
     }
 
     fn render_eval_bar(&self, ui: &mut egui::Ui, score: i32) {
@@ -1122,8 +1282,16 @@ impl DraughtsApp {
         let (board_rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
 
         let painter = ui.painter();
-        let legal_sources = self.legal_sources();
-        let targets = self.legal_targets();
+        let legal_sources = if self.edit_mode {
+            Vec::new()
+        } else {
+            self.legal_sources()
+        };
+        let targets = if self.edit_mode {
+            Vec::new()
+        } else {
+            self.legal_targets()
+        };
 
         for screen_row in 0..8usize {
             for screen_col in 0..8usize {
