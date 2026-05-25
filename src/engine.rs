@@ -29,8 +29,9 @@ struct TTEntry {
 
 #[derive(Clone, Copy, Debug)]
 pub struct EngineConfig {
-    pub max_depth: u32,
-    pub max_time: Duration,
+    pub max_depth: Option<u32>,
+    pub max_time: Option<Duration>,
+    pub max_nodes: Option<u64>,
     pub tt_max_entries: usize,
     pub tt_initial_capacity: usize,
 }
@@ -38,8 +39,23 @@ pub struct EngineConfig {
 impl EngineConfig {
     pub fn play(max_depth: u32, seconds: u64) -> Self {
         Self {
+            max_depth: Some(max_depth),
+            max_time: Some(Duration::from_secs(seconds)),
+            max_nodes: None,
+            tt_max_entries: 2_000_000,
+            tt_initial_capacity: 1_000_000,
+        }
+    }
+
+    pub fn with_limits(
+        max_depth: Option<u32>,
+        max_time: Option<Duration>,
+        max_nodes: Option<u64>,
+    ) -> Self {
+        Self {
             max_depth,
-            max_time: Duration::from_secs(seconds),
+            max_time,
+            max_nodes,
             tt_max_entries: 2_000_000,
             tt_initial_capacity: 1_000_000,
         }
@@ -60,6 +76,7 @@ pub struct SearchReport {
     pub tt_entries: usize,
     pub principal_variation: Vec<String>,
     pub forced_root: bool,
+    pub stop_reason: &'static str,
 }
 
 #[derive(Debug)]
@@ -112,14 +129,15 @@ impl Engine {
 
         let mut latest: Option<SearchReport> = None;
 
-        for depth in 1..=self.config.max_depth {
-            if self.should_stop() {
+        let max_depth = self.config.max_depth.unwrap_or(64);
+        for depth in 1..=max_depth {
+            if self.should_stop(Some(depth)) {
                 break;
             }
 
             match self.search_root(depth) {
                 Ok((score, best_action)) => {
-                    let report = self.make_report(depth, score, best_action);
+                    let report = self.make_report(depth, score, best_action, "limit");
                     on_depth_complete(report.clone());
                     latest = Some(report);
                 }
@@ -130,7 +148,13 @@ impl Engine {
         latest
     }
 
-    fn make_report(&self, depth: u32, score_from_root_turn: i32, action: Action) -> SearchReport {
+    fn make_report(
+        &self,
+        depth: u32,
+        score_from_root_turn: i32,
+        action: Action,
+        stop_reason: &'static str,
+    ) -> SearchReport {
         let elapsed = self.start.elapsed();
         let secs = elapsed.as_secs_f64().max(0.000_001);
         let total_nodes = self.nodes + self.qnodes;
@@ -153,6 +177,7 @@ impl Engine {
             tt_entries: self.tt.len(),
             principal_variation: self.extract_pv(self.root_board, depth),
             forced_root: Self::is_forced_capture_position(self.root_board),
+            stop_reason,
         }
     }
 
@@ -545,14 +570,32 @@ impl Engine {
     }
 
     fn ensure_running(&self) -> Result<(), SearchInterrupted> {
-        if self.should_stop() {
+        if self.should_stop(None) {
             Err(SearchInterrupted)
         } else {
             Ok(())
         }
     }
 
-    fn should_stop(&self) -> bool {
-        self.cancel.load(Ordering::Relaxed) || self.start.elapsed() >= self.config.max_time
+    fn should_stop(&self, next_depth: Option<u32>) -> bool {
+        if self.cancel.load(Ordering::Relaxed) {
+            return true;
+        }
+        if let Some(max_time) = self.config.max_time {
+            if self.start.elapsed() >= max_time {
+                return true;
+            }
+        }
+        if let Some(max_nodes) = self.config.max_nodes {
+            if self.nodes + self.qnodes >= max_nodes {
+                return true;
+            }
+        }
+        if let (Some(max_depth), Some(depth)) = (self.config.max_depth, next_depth) {
+            if depth > max_depth {
+                return true;
+            }
+        }
+        false
     }
 }
