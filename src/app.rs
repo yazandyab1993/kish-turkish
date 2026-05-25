@@ -68,6 +68,30 @@ enum EngineMessage {
     },
 }
 
+
+#[derive(Debug)]
+enum BookLoadError {
+    NotFound,
+    Read(std::io::Error),
+    Parse(serde_json::Error),
+}
+
+impl std::fmt::Display for BookLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "opening_book.json not found"),
+            Self::Read(err) => write!(f, "failed to read opening book: {err}"),
+            Self::Parse(err) => write!(f, "invalid opening book JSON: {err}"),
+        }
+    }
+}
+
+#[derive(Default)]
+struct Diagnostics {
+    book_hits: u64,
+    book_misses: u64,
+}
+
 struct MoveEntry {
     number: usize,
     team: Team,
@@ -104,7 +128,9 @@ pub struct DraughtsApp {
     rx: Receiver<EngineMessage>,
     active_job: Option<ActiveJob>,
     next_job_id: u64,
+    diagnostics: Diagnostics,
 }
+
 
 impl DraughtsApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -123,6 +149,11 @@ impl DraughtsApp {
 
         let (tx, rx) = mpsc::channel();
 
+        let (opening_book, status_message) = match Self::load_opening_book() {
+            Ok(book) => (Some(book), "Your move. Select a piece.".to_owned()),
+            Err(err) => (None, format!("Your move. Select a piece. ({err})")),
+        };
+
         Self {
             game: Game::new(),
             mode: PlayMode::HumanWhite,
@@ -139,22 +170,28 @@ impl DraughtsApp {
             max_depth: 14,
             analysis_enabled: true,
             opening_book_enabled: true,
-            opening_book: Self::load_opening_book(),
+            opening_book,
             latest_report: None,
             latest_purpose: None,
             analyzed_position: None,
-            status_message: "Your move. Select a piece.".to_owned(),
+            status_message,
             tx,
             rx,
             active_job: None,
             next_job_id: 0,
+            diagnostics: Diagnostics::default(),
         }
     }
 
 
-    fn load_opening_book() -> Option<OpeningBook> {
-        let content = std::fs::read_to_string("opening_book.json").ok()?;
-        serde_json::from_str::<OpeningBook>(&content).ok()
+    fn load_opening_book() -> Result<OpeningBook, BookLoadError> {
+        let path = std::path::Path::new("opening_book.json");
+        if !path.exists() {
+            return Err(BookLoadError::NotFound);
+        }
+
+        let content = std::fs::read_to_string(path).map_err(BookLoadError::Read)?;
+        serde_json::from_str::<OpeningBook>(&content).map_err(BookLoadError::Parse)
     }
 
     fn try_opening_book_action(&self, board: Board) -> Option<Action> {
@@ -342,9 +379,11 @@ impl DraughtsApp {
 
         if !self.is_human_turn() {
             if let Some(action) = self.try_opening_book_action(*self.game.board()) {
+                self.diagnostics.book_hits += 1;
                 self.apply_move(action, true);
                 self.status_message = "Engine played from opening book.".to_owned();
             } else {
+                self.diagnostics.book_misses += 1;
                 self.spawn_search(ctx, JobPurpose::EngineMove);
             }
         } else if self.analysis_enabled && self.analyzed_position != Some(*self.game.board()) {
@@ -633,6 +672,11 @@ impl DraughtsApp {
                 format_number(report.tt_entries as u64)
             ));
             ui.label(format!("Cutoffs: {}", format_number(report.cutoffs)));
+            ui.label(format!(
+                "Book hits: {}  |  Book misses: {}",
+                format_number(self.diagnostics.book_hits),
+                format_number(self.diagnostics.book_misses)
+            ));
             ui.add_space(5.0);
             ui.label(egui::RichText::new("Principal variation").strong());
             if report.principal_variation.is_empty() {
@@ -828,7 +872,7 @@ impl DraughtsApp {
     }
 
     fn render_board(&mut self, ui: &mut egui::Ui) {
-        let board = *self.game.board();
+        let board = if self.edit_mode { self.edit_board } else { *self.game.board() };
         let available = ui.available_size();
         let size = available.x.min(available.y).min(720.0).max(420.0);
         let cell = size / 8.0;
