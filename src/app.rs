@@ -2,6 +2,7 @@ use crate::engine::{Engine, EngineConfig, SearchReport};
 use crate::opening_book::{self, OpeningBook, Side};
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use kish::{Action, Board, Game, GameStatus, Square, Team};
+use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::{self, Receiver, Sender},
@@ -9,7 +10,6 @@ use std::sync::{
 };
 use std::thread;
 use std::time::Duration;
-use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PlayMode {
@@ -69,7 +69,6 @@ enum EngineMessage {
     },
 }
 
-
 #[derive(Debug)]
 enum BookLoadError {
     NotFound,
@@ -91,6 +90,15 @@ impl std::fmt::Display for BookLoadError {
 struct Diagnostics {
     book_hits: u64,
     book_misses: u64,
+}
+
+#[derive(Clone)]
+struct AnalysisSnapshot {
+    depth: u32,
+    nodes: u64,
+    score_white: i32,
+    elapsed_secs: f64,
+    pv: Vec<String>,
 }
 
 struct MoveEntry {
@@ -123,7 +131,12 @@ pub struct DraughtsApp {
     analysis_enabled: bool,
     analysis_continuous: bool,
     analysis_depth_step: u32,
-    analysis_pause_requested: bool,
+    analysis_paused_by_user: bool,
+    analysis_use_time_limit: bool,
+    analysis_use_depth_limit: bool,
+    analysis_use_nodes_limit: bool,
+    analysis_max_depth: u32,
+    analysis_max_nodes_millions: u64,
     opening_book_enabled: bool,
     opening_book: Option<OpeningBook>,
 
@@ -138,8 +151,8 @@ pub struct DraughtsApp {
     next_job_id: u64,
     diagnostics: Diagnostics,
     analysis_cache: HashMap<String, SearchReport>,
+    analysis_variations: Vec<AnalysisSnapshot>,
 }
-
 
 impl DraughtsApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -184,7 +197,12 @@ impl DraughtsApp {
             analysis_enabled: true,
             analysis_continuous: false,
             analysis_depth_step: 2,
-            analysis_pause_requested: false,
+            analysis_paused_by_user: false,
+            analysis_use_time_limit: true,
+            analysis_use_depth_limit: true,
+            analysis_use_nodes_limit: false,
+            analysis_max_depth: 16,
+            analysis_max_nodes_millions: 20,
             opening_book_enabled: true,
             opening_book,
             latest_report: None,
@@ -197,9 +215,9 @@ impl DraughtsApp {
             next_job_id: 0,
             diagnostics: Diagnostics::default(),
             analysis_cache: HashMap::new(),
+            analysis_variations: Vec::new(),
         }
     }
-
 
     fn load_opening_book() -> Result<OpeningBook, BookLoadError> {
         let path = std::path::Path::new("opening_book.json");
@@ -216,7 +234,11 @@ impl DraughtsApp {
             return None;
         }
         let book = self.opening_book.as_ref()?;
-        let side = if board.turn == Team::White { Side::White } else { Side::Black };
+        let side = if board.turn == Team::White {
+            Side::White
+        } else {
+            Side::Black
+        };
         let raw = format!("{}", board.state);
         let rows: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
         if rows.len() != 8 {
@@ -274,7 +296,7 @@ impl DraughtsApp {
         self.analyzed_position = None;
         self.status_message = "New game started.".to_owned();
         self.last_move = None;
-        self.analysis_pause_requested = false;
+        self.analysis_paused_by_user = false;
     }
 
     fn cancel_active_job(&mut self) {
@@ -304,22 +326,39 @@ impl DraughtsApp {
         let tx = self.tx.clone();
         let repaint = ctx.clone();
 
-        let seconds = if purpose == JobPurpose::EngineMove {
-            self.move_time_secs
+        let (
+            seconds,
+            use_time_limit,
+            use_depth_limit,
+            use_nodes_limit,
+            target_depth,
+            target_nodes_m,
+        ) = if purpose == JobPurpose::EngineMove {
+            (
+                self.move_time_secs,
+                self.use_time_limit,
+                self.use_depth_limit,
+                self.use_nodes_limit,
+                self.max_depth,
+                self.max_nodes_millions,
+            )
         } else {
-            self.analysis_time_secs
+            (
+                self.analysis_time_secs,
+                self.analysis_use_time_limit,
+                self.analysis_use_depth_limit,
+                self.analysis_use_nodes_limit,
+                self.analysis_max_depth,
+                self.analysis_max_nodes_millions,
+            )
         };
-        let max_time = self
-            .use_time_limit
-            .then_some(Duration::from_secs(seconds));
+        let max_time = use_time_limit.then_some(Duration::from_secs(seconds));
         let max_depth = if purpose == JobPurpose::Analysis && self.analysis_continuous {
-            Some(self.max_depth)
+            Some(target_depth)
         } else {
-            self.use_depth_limit.then_some(self.max_depth)
+            use_depth_limit.then_some(target_depth)
         };
-        let max_nodes = self
-            .use_nodes_limit
-            .then_some(self.max_nodes_millions.saturating_mul(1_000_000));
+        let max_nodes = use_nodes_limit.then_some(target_nodes_m.saturating_mul(1_000_000));
         let config = EngineConfig::with_limits(max_depth, max_time, max_nodes);
 
         self.active_job = Some(ActiveJob {
@@ -363,8 +402,11 @@ impl DraughtsApp {
                     report,
                 } => {
                     if self.active_job.as_ref().map(|job| job.id) == Some(id) {
-                        self.latest_report = Some(report);
+                        self.latest_report = Some(report.clone());
                         self.latest_purpose = Some(purpose);
+                        if purpose == JobPurpose::Analysis {
+                            self.record_analysis_snapshot(&report);
+                        }
                     }
                 }
                 EngineMessage::Finished {
@@ -395,16 +437,18 @@ impl DraughtsApp {
                             self.analysis_cache.insert(cache_key, report.clone());
 
                             if self.analysis_continuous
-                                && !self.analysis_pause_requested
+                                && !self.analysis_paused_by_user
                                 && self.game_in_progress()
                                 && *self.game.board() == position
                             {
-                                let next_depth =
-                                    report.completed_depth.saturating_add(self.analysis_depth_step);
-                                self.max_depth = self.max_depth.max(next_depth.min(60));
+                                let next_depth = report
+                                    .completed_depth
+                                    .saturating_add(self.analysis_depth_step);
+                                self.analysis_max_depth =
+                                    self.analysis_max_depth.max(next_depth.min(60));
                                 self.status_message = format!(
                                     "Depth {} reached. Continuing to depth {}...",
-                                    report.completed_depth, self.max_depth
+                                    report.completed_depth, self.analysis_max_depth
                                 );
                                 self.spawn_search(ctx, JobPurpose::Analysis);
                             } else {
@@ -449,8 +493,32 @@ impl DraughtsApp {
         }
     }
 
+    fn record_analysis_snapshot(&mut self, report: &SearchReport) {
+        if report.principal_variation.is_empty() {
+            return;
+        }
+        let exists = self
+            .analysis_variations
+            .iter()
+            .any(|v| v.depth == report.completed_depth && v.pv == report.principal_variation);
+        if exists {
+            return;
+        }
+        self.analysis_variations.push(AnalysisSnapshot {
+            depth: report.completed_depth,
+            nodes: report.nodes,
+            score_white: report.score_white,
+            elapsed_secs: report.elapsed.as_secs_f64(),
+            pv: report.principal_variation.clone(),
+        });
+    }
+
     fn apply_move(&mut self, action: Action, by_engine: bool) {
-        let board = if self.edit_mode { self.edit_board } else { *self.game.board() };
+        let board = if self.edit_mode {
+            self.edit_board
+        } else {
+            *self.game.board()
+        };
         let notation = action.to_detailed(board.turn, &board.state).to_notation();
         let from = action.source(board.turn, board.friendly_pieces());
         let to = action.destination(board.turn, board.friendly_pieces());
@@ -473,7 +541,7 @@ impl DraughtsApp {
         self.selected = None;
         self.pending_choices.clear();
         self.analyzed_position = None;
-        self.analysis_pause_requested = false;
+        self.analysis_paused_by_user = false;
         self.status_message = if by_engine {
             format!("Engine played {notation}.")
         } else {
@@ -509,7 +577,7 @@ impl DraughtsApp {
         self.latest_report = None;
         self.latest_purpose = None;
         self.analyzed_position = None;
-        self.analysis_pause_requested = false;
+        self.analysis_paused_by_user = false;
         self.status_message = "Move undone.".to_owned();
     }
 
@@ -647,7 +715,9 @@ impl DraughtsApp {
                 self.edit_mode = true;
                 self.edit_board = *self.game.board();
                 self.edit_selected = None;
-                self.status_message = "Edit mode enabled. Select a piece then click a target square to move it.".to_owned();
+                self.status_message =
+                    "Edit mode enabled. Select a piece then click a target square to move it."
+                        .to_owned();
             }
             if ui.button("Undo Turn").clicked() {
                 self.undo();
@@ -674,20 +744,48 @@ impl DraughtsApp {
             self.use_nodes_limit,
             egui::Slider::new(&mut self.max_nodes_millions, 1..=500).text("Nodes (million)"),
         );
-        ui.checkbox(&mut self.analysis_enabled, "Live analysis on your turn");
+        ui.checkbox(&mut self.analysis_enabled, "Live analysis");
+        ui.separator();
+        ui.heading("Analysis Session Settings");
+        ui.checkbox(
+            &mut self.analysis_use_time_limit,
+            "Analysis: stop at time limit",
+        );
+        ui.add_enabled(
+            self.analysis_use_time_limit,
+            egui::Slider::new(&mut self.analysis_time_secs, 1..=30).text("Analysis time (s)"),
+        );
+        ui.checkbox(
+            &mut self.analysis_use_depth_limit,
+            "Analysis: stop at depth limit",
+        );
+        ui.add_enabled(
+            self.analysis_use_depth_limit,
+            egui::Slider::new(&mut self.analysis_max_depth, 4..=60).text("Analysis max depth"),
+        );
+        ui.checkbox(
+            &mut self.analysis_use_nodes_limit,
+            "Analysis: stop at nodes limit",
+        );
+        ui.add_enabled(
+            self.analysis_use_nodes_limit,
+            egui::Slider::new(&mut self.analysis_max_nodes_millions, 1..=500)
+                .text("Analysis nodes (million)"),
+        );
         ui.checkbox(&mut self.analysis_continuous, "Continuous depth climbing");
         ui.add_enabled(
             self.analysis_continuous,
             egui::Slider::new(&mut self.analysis_depth_step, 1..=8).text("Depth step"),
         );
-        ui.checkbox(&mut self.opening_book_enabled, "Use opening book for engine moves");
-        ui.add_enabled(
-            self.analysis_enabled,
-            egui::Slider::new(&mut self.analysis_time_secs, 1..=10).text("Analysis time (s)"),
+        ui.checkbox(
+            &mut self.opening_book_enabled,
+            "Use opening book for engine moves",
         );
 
         ui.horizontal(|ui| {
-            let has_any_limit = self.use_time_limit || self.use_depth_limit || self.use_nodes_limit;
+            let has_any_limit = self.analysis_use_time_limit
+                || self.analysis_use_depth_limit
+                || self.analysis_use_nodes_limit;
             if ui
                 .add_enabled(
                     self.active_job.is_none() && has_any_limit,
@@ -696,17 +794,18 @@ impl DraughtsApp {
                 .clicked()
             {
                 self.analyzed_position = None;
-                self.analysis_pause_requested = false;
+                self.analysis_paused_by_user = false;
+                self.analysis_variations.clear();
                 self.spawn_search(ctx, JobPurpose::Analysis);
             }
 
             if ui
-                .add_enabled(self.active_job.is_some(), egui::Button::new("Stop"))
+                .add_enabled(self.active_job.is_some(), egui::Button::new("Pause"))
                 .clicked()
             {
                 self.cancel_active_job();
-                self.analysis_pause_requested = true;
-                self.status_message = "Search stopped.".to_owned();
+                self.analysis_paused_by_user = true;
+                self.status_message = "Analysis paused by user.".to_owned();
             }
         });
 
@@ -715,12 +814,18 @@ impl DraughtsApp {
                 ui.spinner();
                 ui.label("Searching...");
             });
-        } else if !self.use_time_limit && !self.use_depth_limit && !self.use_nodes_limit {
-            ui.colored_label(Color32::YELLOW, "Enable at least one search limit.");
+        } else if !self.analysis_use_time_limit
+            && !self.analysis_use_depth_limit
+            && !self.analysis_use_nodes_limit
+        {
+            ui.colored_label(
+                Color32::YELLOW,
+                "Enable at least one analysis search limit.",
+            );
         }
     }
 
-    fn render_analysis(&self, ui: &mut egui::Ui) {
+    fn render_analysis(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         ui.heading("Analysis");
         let static_eval = Engine::evaluate_white_static(*self.game.board());
@@ -770,7 +875,30 @@ impl DraughtsApp {
             } else {
                 ui.label(report.principal_variation.join("  "));
             }
-            ui.label(format!("PV length: {} plies", report.principal_variation.len()));
+            ui.label(format!(
+                "PV length: {} plies",
+                report.principal_variation.len()
+            ));
+
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Saved variations").strong());
+            if self.analysis_variations.is_empty() {
+                ui.label("No saved variation yet.");
+            } else {
+                for snapshot in &self.analysis_variations {
+                    let label = format!(
+                        "d{} | nodes {} | eval {:+.2} | {:.2}s",
+                        snapshot.depth,
+                        format_number(snapshot.nodes),
+                        snapshot.score_white as f32 / 100.0,
+                        snapshot.elapsed_secs
+                    );
+                    if ui.button(label).clicked() {
+                        self.status_message =
+                            format!("Selected variation: {}", snapshot.pv.join("  "));
+                    }
+                }
+            }
         } else {
             ui.label("No completed engine analysis yet.");
         }
@@ -784,7 +912,6 @@ impl DraughtsApp {
             .color(Color32::from_rgb(147, 158, 170)),
         );
     }
-
 
     fn render_edit_controls(&mut self, ui: &mut egui::Ui) {
         if !self.edit_mode {
@@ -825,7 +952,8 @@ impl DraughtsApp {
                 self.last_move = None;
                 self.edit_mode = false;
                 self.edit_selected = None;
-                self.status_message = "Custom position applied. Engine can start from this setup.".to_owned();
+                self.status_message =
+                    "Custom position applied. Engine can start from this setup.".to_owned();
             }
             if ui.button("Cancel Edit").clicked() {
                 self.edit_mode = false;
@@ -885,7 +1013,8 @@ impl DraughtsApp {
         }
 
         let mask = square.to_mask();
-        let occupied = (self.edit_board.state.pieces[0] | self.edit_board.state.pieces[1]) & mask != 0;
+        let occupied =
+            (self.edit_board.state.pieces[0] | self.edit_board.state.pieces[1]) & mask != 0;
         if occupied {
             self.edit_selected = Some(square);
         }
@@ -959,7 +1088,11 @@ impl DraughtsApp {
     }
 
     fn render_board(&mut self, ui: &mut egui::Ui) {
-        let board = if self.edit_mode { self.edit_board } else { *self.game.board() };
+        let board = if self.edit_mode {
+            self.edit_board
+        } else {
+            *self.game.board()
+        };
         let available = ui.available_size();
         let size = available.x.min(available.y).min(720.0).max(420.0);
         let cell = size / 8.0;
@@ -1004,7 +1137,9 @@ impl DraughtsApp {
                     );
                 }
 
-                if self.selected == Some(square) || (self.edit_mode && self.edit_selected == Some(square)) {
+                if self.selected == Some(square)
+                    || (self.edit_mode && self.edit_selected == Some(square))
+                {
                     painter.rect_filled(
                         rect.shrink(cell * 0.03),
                         4.0,
