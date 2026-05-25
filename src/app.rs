@@ -115,6 +115,10 @@ pub struct DraughtsApp {
     move_time_secs: u64,
     analysis_time_secs: u64,
     max_depth: u32,
+    max_nodes_millions: u64,
+    use_time_limit: bool,
+    use_depth_limit: bool,
+    use_nodes_limit: bool,
     analysis_enabled: bool,
     opening_book_enabled: bool,
     opening_book: Option<OpeningBook>,
@@ -168,6 +172,10 @@ impl DraughtsApp {
             move_time_secs: 3,
             analysis_time_secs: 2,
             max_depth: 14,
+            max_nodes_millions: 10,
+            use_time_limit: true,
+            use_depth_limit: true,
+            use_nodes_limit: false,
             analysis_enabled: true,
             opening_book_enabled: true,
             opening_book,
@@ -291,7 +299,14 @@ impl DraughtsApp {
         } else {
             self.analysis_time_secs
         };
-        let config = EngineConfig::play(self.max_depth, seconds);
+        let max_time = self
+            .use_time_limit
+            .then_some(Duration::from_secs(seconds));
+        let max_depth = self.use_depth_limit.then_some(self.max_depth);
+        let max_nodes = self
+            .use_nodes_limit
+            .then_some(self.max_nodes_millions.saturating_mul(1_000_000));
+        let config = EngineConfig::with_limits(max_depth, max_time, max_nodes);
 
         self.active_job = Some(ActiveJob {
             id,
@@ -599,8 +614,21 @@ impl DraughtsApp {
 
         ui.separator();
         ui.heading("Engine Settings");
-        ui.add(egui::Slider::new(&mut self.move_time_secs, 1..=15).text("Move time (s)"));
-        ui.add(egui::Slider::new(&mut self.max_depth, 4..=24).text("Maximum depth"));
+        ui.checkbox(&mut self.use_time_limit, "Stop at time limit");
+        ui.add_enabled(
+            self.use_time_limit,
+            egui::Slider::new(&mut self.move_time_secs, 1..=30).text("Move time (s)"),
+        );
+        ui.checkbox(&mut self.use_depth_limit, "Stop at depth limit");
+        ui.add_enabled(
+            self.use_depth_limit,
+            egui::Slider::new(&mut self.max_depth, 4..=30).text("Maximum depth"),
+        );
+        ui.checkbox(&mut self.use_nodes_limit, "Stop at nodes limit");
+        ui.add_enabled(
+            self.use_nodes_limit,
+            egui::Slider::new(&mut self.max_nodes_millions, 1..=500).text("Nodes (million)"),
+        );
         ui.checkbox(&mut self.analysis_enabled, "Live analysis on your turn");
         ui.checkbox(&mut self.opening_book_enabled, "Use opening book for engine moves");
         ui.add_enabled(
@@ -609,8 +637,12 @@ impl DraughtsApp {
         );
 
         ui.horizontal(|ui| {
+            let has_any_limit = self.use_time_limit || self.use_depth_limit || self.use_nodes_limit;
             if ui
-                .add_enabled(self.active_job.is_none(), egui::Button::new("Analyse Now"))
+                .add_enabled(
+                    self.active_job.is_none() && has_any_limit,
+                    egui::Button::new("Analyse Now"),
+                )
                 .clicked()
             {
                 self.analyzed_position = None;
@@ -631,6 +663,8 @@ impl DraughtsApp {
                 ui.spinner();
                 ui.label("Searching...");
             });
+        } else if !self.use_time_limit && !self.use_depth_limit && !self.use_nodes_limit {
+            ui.colored_label(Color32::YELLOW, "Enable at least one search limit.");
         }
     }
 
