@@ -24,7 +24,6 @@ struct TTEntry {
     score: i32,
     bound: Bound,
     best_action: Option<Action>,
-    age: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -75,7 +74,6 @@ pub struct Engine {
     cutoffs: u64,
     tt: HashMap<Board, TTEntry>,
     cancel: Arc<AtomicBool>,
-    generation: u64,
 }
 
 impl Engine {
@@ -90,7 +88,6 @@ impl Engine {
             cutoffs: 0,
             tt: HashMap::with_capacity(config.tt_initial_capacity),
             cancel,
-            generation: 0,
         }
     }
 
@@ -99,7 +96,6 @@ impl Engine {
         F: FnMut(SearchReport),
     {
         self.start = Instant::now();
-        self.generation = self.generation.wrapping_add(1);
         self.nodes = 0;
         self.qnodes = 0;
         self.tt_hits = 0;
@@ -177,7 +173,6 @@ impl Engine {
                     score,
                     bound: Bound::Exact,
                     best_action: Some(only_action),
-                    age: self.generation,
                 },
             );
             return Ok((score, only_action));
@@ -215,7 +210,6 @@ impl Engine {
                 score: best_score,
                 bound: Bound::Exact,
                 best_action: Some(best_action),
-                age: self.generation,
             },
         );
 
@@ -300,7 +294,6 @@ impl Engine {
                 score: best_score,
                 bound,
                 best_action,
-                age: self.generation,
             },
         );
 
@@ -520,19 +513,6 @@ impl Engine {
     fn store_tt(&mut self, board: Board, entry: TTEntry) {
         if self.tt.len() < self.config.tt_max_entries || self.tt.contains_key(&board) {
             self.tt.insert(board, entry);
-            return;
-        }
-
-        if let Some((victim_key, victim_entry)) = self
-            .tt
-            .iter()
-            .min_by_key(|(_, e)| (e.depth, e.age))
-            .map(|(k, e)| (*k, *e))
-        {
-            if entry.depth >= victim_entry.depth || entry.age > victim_entry.age {
-                self.tt.remove(&victim_key);
-                self.tt.insert(board, entry);
-            }
         }
     }
 
