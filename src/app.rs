@@ -1050,11 +1050,9 @@ impl DraughtsApp {
         });
     }
 
-    fn is_playable_square(square: Square) -> bool {
-        let index = square.to_usize();
-        let row = index / 8;
-        let col = index % 8;
-        (row + col) % 2 == 1
+    fn is_playable_square(_square: Square) -> bool {
+        // Turkish draughts uses all board squares in play and setup.
+        true
     }
 
     fn push_edit_undo(&mut self) {
@@ -1090,16 +1088,6 @@ impl DraughtsApp {
         if kings & !(white | black) != 0 {
             return Err("Invalid position: king bits must belong to existing pieces.".to_owned());
         }
-        let all = white | black;
-        for i in 0..64usize {
-            let square = Square::try_from_usize(i).expect("valid board index");
-            let mask = square.to_mask();
-            if all & mask != 0 && !Self::is_playable_square(square) {
-                return Err(
-                    "Invalid position: pieces must be on playable (dark) squares.".to_owned(),
-                );
-            }
-        }
         Ok(())
     }
 
@@ -1118,10 +1106,6 @@ impl DraughtsApp {
 
         if !white && !black {
             self.edit_selected = None;
-            return;
-        }
-        if !Self::is_playable_square(to) {
-            self.status_message = "Cannot place pieces on light squares.".to_owned();
             return;
         }
         if (self.edit_board.state.pieces[0] | self.edit_board.state.pieces[1]) & to_mask != 0 {
@@ -1155,10 +1139,6 @@ impl DraughtsApp {
     }
 
     fn click_edit_square(&mut self, square: Square) {
-        if !Self::is_playable_square(square) {
-            self.status_message = "Only dark squares can hold pieces.".to_owned();
-            return;
-        }
         if self.edit_tool != EditTool::Move {
             self.apply_edit_tool(square);
             return;
