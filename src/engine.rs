@@ -339,8 +339,7 @@ impl Engine {
         beta: i32,
         ply: u32,
     ) -> Result<i32, SearchInterrupted> {
-        self.visit_node()?;
-        self.qnodes += 1;
+        self.visit_qnode()?;
 
         if let Some(score) = self.terminal_score(board, ply) {
             return Ok(score);
@@ -563,7 +562,15 @@ impl Engine {
 
     fn visit_node(&mut self) -> Result<(), SearchInterrupted> {
         self.nodes += 1;
-        if (self.nodes & 2047) == 0 {
+        if ((self.nodes + self.qnodes) & 2047) == 0 {
+            self.ensure_running()?;
+        }
+        Ok(())
+    }
+
+    fn visit_qnode(&mut self) -> Result<(), SearchInterrupted> {
+        self.qnodes += 1;
+        if ((self.nodes + self.qnodes) & 2047) == 0 {
             self.ensure_running()?;
         }
         Ok(())
