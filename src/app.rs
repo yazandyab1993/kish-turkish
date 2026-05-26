@@ -110,6 +110,26 @@ struct Diagnostics {
     variation_misses: u64,
     book_hits: u64,
     book_misses: u64,
+    book_skipped_due_to_variation_hit: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BookPriorityMode {
+    VariationFirst,
+    OpeningFirst,
+    VariationOnly,
+    OpeningOnly,
+}
+
+impl BookPriorityMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::VariationFirst => "Variation first",
+            Self::OpeningFirst => "Opening first",
+            Self::VariationOnly => "Variation only",
+            Self::OpeningOnly => "Opening only",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -190,6 +210,7 @@ pub struct DraughtsApp {
     variation_book_enabled: bool,
     variation_book_path: String,
     variation_book: Option<VariationBook>,
+    book_priority_mode: BookPriorityMode,
 
     latest_report: Option<SearchReport>,
     latest_purpose: Option<JobPurpose>,
@@ -271,6 +292,7 @@ impl DraughtsApp {
             variation_book_enabled: true,
             variation_book_path,
             variation_book,
+            book_priority_mode: BookPriorityMode::VariationFirst,
             latest_report: None,
             latest_purpose: None,
             analyzed_position: None,
@@ -303,8 +325,11 @@ impl DraughtsApp {
         match variation_book::load_variation_book(path) {
             Ok((book, warnings)) => {
                 let mut status = format!(
-                    "variation lines: {} loaded, {} rejected",
-                    book.metadata.loaded_lines, book.metadata.rejected_lines
+                    "variation lines: {} loaded, {} rejected | positions indexed: {} | duplicates ignored: {}",
+                    book.metadata.loaded_lines,
+                    book.metadata.rejected_lines,
+                    book.metadata.positions_indexed,
+                    book.metadata.duplicate_positions_ignored
                 );
                 if let Some(first_warning) = warnings.first() {
                     status.push_str(&format!(" ({first_warning})"));
@@ -570,17 +595,79 @@ impl DraughtsApp {
         }
 
         if !self.is_human_turn() {
-            if let Some(action) = self.try_variation_book_action(*self.game.board()) {
-                self.diagnostics.variation_hits += 1;
+            let board = *self.game.board();
+            let variation_action = self.try_variation_book_action(board);
+            let opening_action = self.try_opening_book_action(board);
+
+            let selected_action = match self.book_priority_mode {
+                BookPriorityMode::VariationFirst => {
+                    if let Some(action) = variation_action {
+                        self.diagnostics.variation_hits += 1;
+                        self.diagnostics.book_skipped_due_to_variation_hit += 1;
+                        self.status_message =
+                            "Engine played from variation book (mode: variation first).".to_owned();
+                        Some(action)
+                    } else {
+                        self.diagnostics.variation_misses += 1;
+                        if let Some(action) = opening_action {
+                            self.diagnostics.book_hits += 1;
+                            self.status_message =
+                                "Engine played from opening book (mode: variation first)."
+                                    .to_owned();
+                            Some(action)
+                        } else {
+                            self.diagnostics.book_misses += 1;
+                            None
+                        }
+                    }
+                }
+                BookPriorityMode::OpeningFirst => {
+                    if let Some(action) = opening_action {
+                        self.diagnostics.book_hits += 1;
+                        self.status_message =
+                            "Engine played from opening book (mode: opening first).".to_owned();
+                        Some(action)
+                    } else {
+                        self.diagnostics.book_misses += 1;
+                        if let Some(action) = variation_action {
+                            self.diagnostics.variation_hits += 1;
+                            self.status_message =
+                                "Engine played from variation book (mode: opening first)."
+                                    .to_owned();
+                            Some(action)
+                        } else {
+                            self.diagnostics.variation_misses += 1;
+                            None
+                        }
+                    }
+                }
+                BookPriorityMode::VariationOnly => {
+                    if let Some(action) = variation_action {
+                        self.diagnostics.variation_hits += 1;
+                        self.status_message =
+                            "Engine played from variation book (mode: variation only).".to_owned();
+                        Some(action)
+                    } else {
+                        self.diagnostics.variation_misses += 1;
+                        None
+                    }
+                }
+                BookPriorityMode::OpeningOnly => {
+                    if let Some(action) = opening_action {
+                        self.diagnostics.book_hits += 1;
+                        self.status_message =
+                            "Engine played from opening book (mode: opening only).".to_owned();
+                        Some(action)
+                    } else {
+                        self.diagnostics.book_misses += 1;
+                        None
+                    }
+                }
+            };
+
+            if let Some(action) = selected_action {
                 self.apply_move(action, true);
-                self.status_message = "Engine played from variation book.".to_owned();
-            } else if let Some(action) = self.try_opening_book_action(*self.game.board()) {
-                self.diagnostics.book_hits += 1;
-                self.apply_move(action, true);
-                self.status_message = "Engine played from opening book.".to_owned();
             } else {
-                self.diagnostics.variation_misses += 1;
-                self.diagnostics.book_misses += 1;
                 self.spawn_search(ctx, JobPurpose::EngineMove);
             }
         } else if self.analysis_enabled && self.analyzed_position != Some(*self.game.board()) {
@@ -893,6 +980,30 @@ impl DraughtsApp {
             &mut self.variation_book_enabled,
             "Use variation book for engine moves",
         );
+        egui::ComboBox::from_label("Book priority mode")
+            .selected_text(self.book_priority_mode.label())
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.book_priority_mode,
+                    BookPriorityMode::VariationFirst,
+                    BookPriorityMode::VariationFirst.label(),
+                );
+                ui.selectable_value(
+                    &mut self.book_priority_mode,
+                    BookPriorityMode::OpeningFirst,
+                    BookPriorityMode::OpeningFirst.label(),
+                );
+                ui.selectable_value(
+                    &mut self.book_priority_mode,
+                    BookPriorityMode::VariationOnly,
+                    BookPriorityMode::VariationOnly.label(),
+                );
+                ui.selectable_value(
+                    &mut self.book_priority_mode,
+                    BookPriorityMode::OpeningOnly,
+                    BookPriorityMode::OpeningOnly.label(),
+                );
+            });
         ui.horizontal(|ui| {
             ui.label("Variation file:");
             ui.text_edit_singleline(&mut self.variation_book_path);
@@ -994,6 +1105,10 @@ impl DraughtsApp {
                 "Book hits: {}  |  Book misses: {}",
                 format_number(self.diagnostics.book_hits),
                 format_number(self.diagnostics.book_misses)
+            ));
+            ui.label(format!(
+                "Book skipped (variation hit): {}",
+                format_number(self.diagnostics.book_skipped_due_to_variation_hit)
             ));
             ui.add_space(5.0);
             ui.label(egui::RichText::new("Principal variation").strong());
