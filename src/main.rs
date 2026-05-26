@@ -1,7 +1,6 @@
 mod app;
 mod engine;
 mod opening_book;
-mod variation_book;
 
 use app::DraughtsApp;
 use eframe::egui;

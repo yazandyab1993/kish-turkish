@@ -78,21 +78,3 @@ The evaluation bar is the engine's calculated estimate from the current search, 
 - `+1.00` is approximately one ordinary piece of evaluation in the current scoring model.
 
 It is not a proven tablebase result unless a winning terminal line is reached.
-
-
-## Variation Book (user-defined fast moves)
-
-You can add a manual variation book in `variations.txt`.
-
-- Format: one line per variation.
-- Each move token must be `from-to`, for example: `d3-d4`.
-- Example line:
-
-```text
-d3-d4 f6-f5 d2-d3 f7-f6 e3-e4 c6-c5 e2-e3 c7-c6 b3-b4 g6-g5
-```
-
-Engine priority for automated play is now:
-1. Variation book move (if position matches).
-2. Opening book move.
-3. Regular engine search.
