@@ -14,8 +14,6 @@ pub struct VariationMetadata {
     pub source_path: String,
     pub loaded_lines: usize,
     pub rejected_lines: usize,
-    pub positions_indexed: usize,
-    pub duplicate_positions_ignored: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,7 +49,6 @@ pub fn load_variation_book(
     let mut warnings = Vec::new();
     let mut loaded_lines = 0;
     let mut rejected_lines = 0;
-    let mut duplicate_positions_ignored = 0;
 
     for (line_idx, raw_line) in content.lines().enumerate() {
         let line = raw_line.trim();
@@ -78,7 +75,6 @@ pub fn load_variation_book(
 
         let mut board = *Game::new().board();
         let mut line_valid = true;
-        let mut line_entries = Vec::new();
 
         for parsed in parsed_moves {
             let side = board.turn;
@@ -94,25 +90,15 @@ pub fn load_variation_book(
             };
 
             let key = board_key(board);
-            line_entries.push((
-                key,
-                MoveSpec {
-                    from: square_name(action.source(side, board.friendly_pieces())),
-                    to: square_name(action.destination(side, board.friendly_pieces())),
-                },
-            ));
+            entries.entry(key).or_insert_with(|| MoveSpec {
+                from: square_name(action.source(side, board.friendly_pieces())),
+                to: square_name(action.destination(side, board.friendly_pieces())),
+            });
 
             board = board.apply(&action).swap_turn();
         }
 
         if line_valid {
-            for (key, mv) in line_entries {
-                if entries.contains_key(&key) {
-                    duplicate_positions_ignored += 1;
-                    continue;
-                }
-                entries.insert(key, mv);
-            }
             loaded_lines += 1;
         } else {
             rejected_lines += 1;
@@ -125,8 +111,6 @@ pub fn load_variation_book(
                 source_path: path.display().to_string(),
                 loaded_lines,
                 rejected_lines,
-                positions_indexed: entries.len(),
-                duplicate_positions_ignored,
             },
             entries,
         },
