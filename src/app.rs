@@ -1,6 +1,5 @@
 use crate::engine::{Engine, EngineConfig, SearchReport};
 use crate::opening_book::{self, OpeningBook, Side};
-use crate::variation_book::{self, VariationBook};
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use kish::{Action, Board, Game, GameStatus, Square, Team};
 use std::collections::HashMap;
@@ -106,8 +105,6 @@ impl std::fmt::Display for BookLoadError {
 
 #[derive(Default)]
 struct Diagnostics {
-    variation_hits: u64,
-    variation_misses: u64,
     book_hits: u64,
     book_misses: u64,
 }
@@ -187,9 +184,6 @@ pub struct DraughtsApp {
     analysis_max_nodes_millions: u64,
     opening_book_enabled: bool,
     opening_book: Option<OpeningBook>,
-    variation_book_enabled: bool,
-    variation_book_path: String,
-    variation_book: Option<VariationBook>,
 
     latest_report: Option<SearchReport>,
     latest_purpose: Option<JobPurpose>,
@@ -227,14 +221,6 @@ impl DraughtsApp {
             Ok(book) => (Some(book), "Your move. Select a piece.".to_owned()),
             Err(err) => (None, format!("Your move. Select a piece. ({err})")),
         };
-        let variation_book_path = "variations.txt".to_owned();
-        let (variation_book, variation_status) =
-            Self::load_variation_book(std::path::Path::new(&variation_book_path));
-        let status_message = if variation_status.is_empty() {
-            status_message
-        } else {
-            format!("{status_message} ({variation_status})")
-        };
 
         Self {
             game: Game::new(),
@@ -268,9 +254,6 @@ impl DraughtsApp {
             analysis_max_nodes_millions: 20,
             opening_book_enabled: true,
             opening_book,
-            variation_book_enabled: true,
-            variation_book_path,
-            variation_book,
             latest_report: None,
             latest_purpose: None,
             analyzed_position: None,
@@ -294,25 +277,6 @@ impl DraughtsApp {
 
         let content = std::fs::read_to_string(path).map_err(BookLoadError::Read)?;
         serde_json::from_str::<OpeningBook>(&content).map_err(BookLoadError::Parse)
-    }
-
-    fn load_variation_book(path: &std::path::Path) -> (Option<VariationBook>, String) {
-        if !path.exists() {
-            return (None, "variation book file not found".to_owned());
-        }
-        match variation_book::load_variation_book(path) {
-            Ok((book, warnings)) => {
-                let mut status = format!(
-                    "variation lines: {} loaded, {} rejected",
-                    book.metadata.loaded_lines, book.metadata.rejected_lines
-                );
-                if let Some(first_warning) = warnings.first() {
-                    status.push_str(&format!(" ({first_warning})"));
-                }
-                (Some(book), status)
-            }
-            Err(err) => (None, err.to_string()),
-        }
     }
 
     fn try_opening_book_action(&self, board: Board) -> Option<Action> {
@@ -348,21 +312,6 @@ impl DraughtsApp {
         let rec = opening_book::get_book_move(book, &converted, side, "best")?;
         let source = Self::square_from_name(&rec.from)?;
         let target = Self::square_from_name(&rec.to)?;
-
-        board.actions().into_iter().find(|action| {
-            action.source(board.turn, board.friendly_pieces()) == source
-                && action.destination(board.turn, board.friendly_pieces()) == target
-        })
-    }
-
-    fn try_variation_book_action(&self, board: Board) -> Option<Action> {
-        if !self.variation_book_enabled {
-            return None;
-        }
-        let book = self.variation_book.as_ref()?;
-        let mv = variation_book::lookup_action(book, board)?;
-        let source = Self::square_from_name(&mv.from)?;
-        let target = Self::square_from_name(&mv.to)?;
 
         board.actions().into_iter().find(|action| {
             action.source(board.turn, board.friendly_pieces()) == source
@@ -570,16 +519,11 @@ impl DraughtsApp {
         }
 
         if !self.is_human_turn() {
-            if let Some(action) = self.try_variation_book_action(*self.game.board()) {
-                self.diagnostics.variation_hits += 1;
-                self.apply_move(action, true);
-                self.status_message = "Engine played from variation book.".to_owned();
-            } else if let Some(action) = self.try_opening_book_action(*self.game.board()) {
+            if let Some(action) = self.try_opening_book_action(*self.game.board()) {
                 self.diagnostics.book_hits += 1;
                 self.apply_move(action, true);
                 self.status_message = "Engine played from opening book.".to_owned();
             } else {
-                self.diagnostics.variation_misses += 1;
                 self.diagnostics.book_misses += 1;
                 self.spawn_search(ctx, JobPurpose::EngineMove);
             }
@@ -889,20 +833,6 @@ impl DraughtsApp {
             &mut self.opening_book_enabled,
             "Use opening book for engine moves",
         );
-        ui.checkbox(
-            &mut self.variation_book_enabled,
-            "Use variation book for engine moves",
-        );
-        ui.horizontal(|ui| {
-            ui.label("Variation file:");
-            ui.text_edit_singleline(&mut self.variation_book_path);
-            if ui.button("Reload Variations").clicked() {
-                let (book, status) =
-                    Self::load_variation_book(std::path::Path::new(&self.variation_book_path));
-                self.variation_book = book;
-                self.status_message = format!("Variations reloaded: {status}");
-            }
-        });
 
         ui.horizontal(|ui| {
             let has_any_limit = self.analysis_use_time_limit
@@ -985,11 +915,6 @@ impl DraughtsApp {
                 format_number(report.tt_entries as u64)
             ));
             ui.label(format!("Cutoffs: {}", format_number(report.cutoffs)));
-            ui.label(format!(
-                "Variation hits: {}  |  Variation misses: {}",
-                format_number(self.diagnostics.variation_hits),
-                format_number(self.diagnostics.variation_misses)
-            ));
             ui.label(format!(
                 "Book hits: {}  |  Book misses: {}",
                 format_number(self.diagnostics.book_hits),
