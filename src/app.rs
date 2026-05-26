@@ -848,26 +848,20 @@ impl DraughtsApp {
     }
 
     fn render_header(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::new()
-            .fill(Color32::from_rgb(20, 25, 33))
-            .corner_radius(8.0)
-            .inner_margin(egui::Margin::same(10))
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.heading("KISH  ·  TURKISH DRAUGHTS STUDIO");
-                    ui.add_space(12.0);
-                    let turn = self.game.turn();
-                    ui.label(egui::RichText::new(format!("Turn: {turn}")).strong().color(
-                        if turn == Team::White {
-                            Color32::from_rgb(231, 232, 235)
-                        } else {
-                            Color32::from_rgb(168, 179, 194)
-                        },
-                    ));
-                    ui.separator();
-                    ui.label(egui::RichText::new(&self.status_message).small());
-                });
-            });
+        ui.horizontal(|ui| {
+            ui.heading("KISH  ·  TURKISH DRAUGHTS STUDIO");
+            ui.add_space(18.0);
+            let turn = self.game.turn();
+            ui.label(egui::RichText::new(format!("Turn: {turn}")).strong().color(
+                if turn == Team::White {
+                    Color32::from_rgb(231, 232, 235)
+                } else {
+                    Color32::from_rgb(168, 179, 194)
+                },
+            ));
+            ui.separator();
+            ui.label(&self.status_message);
+        });
     }
 
     fn render_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1689,49 +1683,34 @@ impl eframe::App for DraughtsApp {
 
         ui.columns(2, |columns| {
             columns[0].set_min_width(640.0);
-            egui::Frame::new()
-                .fill(Color32::from_rgb(20, 25, 33))
-                .corner_radius(8.0)
-                .inner_margin(egui::Margin::same(10))
-                .show(&mut columns[0], |ui| {
-                    self.render_board(ui);
-                });
+            self.render_board(&mut columns[0]);
 
             let side_ctx = columns[1].ctx().clone();
 
-            egui::Frame::new()
-                .fill(Color32::from_rgb(20, 25, 33))
-                .corner_radius(8.0)
-                .inner_margin(egui::Margin::same(10))
-                .show(&mut columns[1], |ui| {
-                    ui.horizontal(|ui| {
-                        for tab in [
-                            SidePanelTab::Controls,
-                            SidePanelTab::Analysis,
-                            SidePanelTab::Moves,
-                        ] {
-                            let selected = self.side_panel_tab == tab;
-                            let button = egui::Button::new(tab.label()).selected(selected);
-                            if ui.add_sized([96.0, 28.0], button).clicked() {
-                                self.side_panel_tab = tab;
-                            }
-                        }
-                    });
-                    ui.add_space(6.0);
-                    ui.separator();
-                    egui::ScrollArea::vertical().show(ui, |ui| match self.side_panel_tab {
-                        SidePanelTab::Controls => {
-                            self.render_controls(ui, &side_ctx);
-                            self.render_edit_controls(ui);
-                        }
-                        SidePanelTab::Analysis => {
-                            self.render_analysis(ui);
-                        }
-                        SidePanelTab::Moves => {
-                            self.render_moves(ui);
-                        }
-                    });
+            columns[1].vertical(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for tab in [
+                        SidePanelTab::Controls,
+                        SidePanelTab::Analysis,
+                        SidePanelTab::Moves,
+                    ] {
+                        ui.selectable_value(&mut self.side_panel_tab, tab, tab.label());
+                    }
                 });
+                ui.separator();
+                egui::ScrollArea::vertical().show(ui, |ui| match self.side_panel_tab {
+                    SidePanelTab::Controls => {
+                        self.render_controls(ui, &side_ctx);
+                        self.render_edit_controls(ui);
+                    }
+                    SidePanelTab::Analysis => {
+                        self.render_analysis(ui);
+                    }
+                    SidePanelTab::Moves => {
+                        self.render_moves(ui);
+                    }
+                });
+            });
         });
 
         if self.active_job.is_some() {
