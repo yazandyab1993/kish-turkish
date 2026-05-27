@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 const INF: i32 = 2_000_000_000;
 const MATE_SCORE: i32 = 1_000_000;
 const CENTER_BOX: u64 = 0x0000_3C3C_3C3C_0000;
+const ASPIRATION_START: i32 = 35;
 
 #[derive(Clone, Copy, Debug)]
 enum Bound {
@@ -77,6 +78,10 @@ pub struct SearchReport {
     pub principal_variation: Vec<String>,
     pub forced_root: bool,
     pub stop_reason: &'static str,
+    pub aspiration_fail_high: u64,
+    pub aspiration_fail_low: u64,
+    pub aspiration_researches: u64,
+    pub tt_replacements: u64,
 }
 
 #[derive(Debug)]
@@ -93,6 +98,10 @@ pub struct Engine {
     tt: HashMap<Board, TTEntry>,
     cancel: Arc<AtomicBool>,
     generation: u64,
+    aspiration_fail_high: u64,
+    aspiration_fail_low: u64,
+    aspiration_researches: u64,
+    tt_replacements: u64,
 }
 
 impl Engine {
@@ -108,6 +117,10 @@ impl Engine {
             tt: HashMap::with_capacity(config.tt_initial_capacity),
             cancel,
             generation: 0,
+            aspiration_fail_high: 0,
+            aspiration_fail_low: 0,
+            aspiration_researches: 0,
+            tt_replacements: 0,
         }
     }
 
@@ -121,22 +134,33 @@ impl Engine {
         self.qnodes = 0;
         self.tt_hits = 0;
         self.cutoffs = 0;
-        self.tt.clear();
+        self.aspiration_fail_high = 0;
+        self.aspiration_fail_low = 0;
+        self.aspiration_researches = 0;
+        self.tt_replacements = 0;
 
         if self.root_board.actions().is_empty() {
             return None;
         }
 
         let mut latest: Option<SearchReport> = None;
-
+        let mut previous_score: Option<i32> = None;
         let max_depth = self.config.max_depth.unwrap_or(64);
+
         for depth in 1..=max_depth {
             if self.should_stop(Some(depth)) {
                 break;
             }
 
-            match self.search_root(depth) {
+            let result = if let Some(seed) = previous_score {
+                self.search_root_aspiration(depth, seed)
+            } else {
+                self.search_root(depth, -INF, INF)
+            };
+
+            match result {
                 Ok((score, best_action)) => {
+                    previous_score = Some(score);
                     let report = self.make_report(depth, score, best_action, "limit");
                     on_depth_complete(report.clone());
                     latest = Some(report);
@@ -146,6 +170,37 @@ impl Engine {
         }
 
         latest
+    }
+
+    fn search_root_aspiration(
+        &mut self,
+        depth: u32,
+        previous_score: i32,
+    ) -> Result<(i32, Action), SearchInterrupted> {
+        let mut window = ASPIRATION_START;
+        let mut alpha = previous_score - window;
+        let mut beta = previous_score + window;
+
+        loop {
+            let (score, action) = self.search_root(depth, alpha, beta)?;
+            if score <= alpha {
+                self.aspiration_fail_low += 1;
+                self.aspiration_researches += 1;
+                window = (window * 2).min(MATE_SCORE / 2);
+                alpha = previous_score - window;
+                beta = previous_score + window;
+                continue;
+            }
+            if score >= beta {
+                self.aspiration_fail_high += 1;
+                self.aspiration_researches += 1;
+                window = (window * 2).min(MATE_SCORE / 2);
+                alpha = previous_score - window;
+                beta = previous_score + window;
+                continue;
+            }
+            return Ok((score, action));
+        }
     }
 
     fn make_report(
@@ -178,10 +233,19 @@ impl Engine {
             principal_variation: self.extract_pv(self.root_board, depth),
             forced_root: Self::is_forced_capture_position(self.root_board),
             stop_reason,
+            aspiration_fail_high: self.aspiration_fail_high,
+            aspiration_fail_low: self.aspiration_fail_low,
+            aspiration_researches: self.aspiration_researches,
+            tt_replacements: self.tt_replacements,
         }
     }
 
-    fn search_root(&mut self, depth: u32) -> Result<(i32, Action), SearchInterrupted> {
+    fn search_root(
+        &mut self,
+        depth: u32,
+        alpha: i32,
+        beta: i32,
+    ) -> Result<(i32, Action), SearchInterrupted> {
         self.ensure_running()?;
 
         let board = self.root_board;
@@ -189,6 +253,9 @@ impl Engine {
         if actions.is_empty() {
             return Err(SearchInterrupted);
         }
+
+        let alpha_start = alpha;
+        let beta_start = beta;
 
         let forced_capture = Self::is_forced_capture_actions(board, &actions);
         if actions.len() == 1 && forced_capture {
@@ -211,15 +278,32 @@ impl Engine {
         let tt_move = self.tt.get(&board).and_then(|entry| entry.best_action);
         self.order_moves(board, &mut actions, tt_move);
 
+        let mut alpha_local = alpha;
         let mut best_score = -INF;
         let mut best_tie_break = -INF;
         let mut best_action = actions[0];
 
-        for action in actions {
+        for (index, action) in actions.into_iter().enumerate() {
             self.ensure_running()?;
-
             let child = board.apply(&action).swap_turn();
-            let score = -self.negamax(child, depth.saturating_sub(1), -INF, INF, 1)?;
+
+            let mut score;
+            if index == 0 {
+                score = -self.negamax(child, depth.saturating_sub(1), -beta, -alpha_local, 1)?;
+            } else {
+                score = -self.negamax(
+                    child,
+                    depth.saturating_sub(1),
+                    -alpha_local - 1,
+                    -alpha_local,
+                    1,
+                )?;
+                if score > alpha_local && score < beta {
+                    score =
+                        -self.negamax(child, depth.saturating_sub(1), -beta, -alpha_local, 1)?;
+                }
+            }
+
             let tie_break = if forced_capture {
                 action.capture_count(board.turn) as i32
             } else {
@@ -231,14 +315,30 @@ impl Engine {
                 best_tie_break = tie_break;
                 best_action = action;
             }
+
+            if score > alpha_local {
+                alpha_local = score;
+            }
+            if alpha_local >= beta {
+                self.cutoffs += 1;
+                break;
+            }
         }
+
+        let bound = if best_score <= alpha_start {
+            Bound::Upper
+        } else if best_score >= beta_start {
+            Bound::Lower
+        } else {
+            Bound::Exact
+        };
 
         self.store_tt(
             board,
             TTEntry {
                 depth,
                 score: best_score,
-                bound: Bound::Exact,
+                bound,
                 best_action: Some(best_action),
                 age: self.generation,
             },
@@ -256,11 +356,9 @@ impl Engine {
         ply: u32,
     ) -> Result<i32, SearchInterrupted> {
         self.visit_node()?;
-
         if let Some(score) = self.terminal_score(board, ply) {
             return Ok(score);
         }
-
         if depth == 0 {
             return self.quiescence(board, alpha, beta, ply);
         }
@@ -293,9 +391,17 @@ impl Engine {
         let mut best_score = -INF;
         let mut best_action: Option<Action> = None;
 
-        for action in actions {
+        for (idx, action) in actions.into_iter().enumerate() {
             let child = board.apply(&action).swap_turn();
-            let score = -self.negamax(child, depth - 1, -beta, -alpha, ply + 1)?;
+            let mut score;
+            if idx == 0 {
+                score = -self.negamax(child, depth - 1, -beta, -alpha, ply + 1)?;
+            } else {
+                score = -self.negamax(child, depth - 1, -alpha - 1, -alpha, ply + 1)?;
+                if score > alpha && score < beta {
+                    score = -self.negamax(child, depth - 1, -beta, -alpha, ply + 1)?;
+                }
+            }
 
             if score > best_score {
                 best_score = score;
@@ -317,7 +423,6 @@ impl Engine {
         } else {
             Bound::Exact
         };
-
         self.store_tt(
             board,
             TTEntry {
@@ -328,7 +433,6 @@ impl Engine {
                 age: self.generation,
             },
         );
-
         Ok(best_score)
     }
 
@@ -340,7 +444,6 @@ impl Engine {
         ply: u32,
     ) -> Result<i32, SearchInterrupted> {
         self.visit_qnode()?;
-
         if let Some(score) = self.terminal_score(board, ply) {
             return Ok(score);
         }
@@ -348,9 +451,8 @@ impl Engine {
         let mut actions = board.actions();
         let forced_capture = actions
             .first()
-            .map(|action| action.is_capture(board.turn))
+            .map(|a| a.is_capture(board.turn))
             .unwrap_or(false);
-
         if !forced_capture {
             return Ok(self.evaluate_for_turn(board));
         }
@@ -361,7 +463,6 @@ impl Engine {
         for action in actions {
             let child = board.apply(&action).swap_turn();
             let score = -self.quiescence(child, -beta, -alpha, ply + 1)?;
-
             if score > best_score {
                 best_score = score;
             }
@@ -373,7 +474,6 @@ impl Engine {
                 return Ok(alpha);
             }
         }
-
         Ok(best_score)
     }
 
@@ -381,16 +481,13 @@ impl Engine {
         match board.status() {
             GameStatus::InProgress => None,
             GameStatus::Draw => Some(0),
-            GameStatus::Won(winner) => {
-                if winner == board.turn {
-                    Some(MATE_SCORE - ply as i32)
-                } else {
-                    Some(-MATE_SCORE + ply as i32)
-                }
-            }
+            GameStatus::Won(w) => Some(if w == board.turn {
+                MATE_SCORE - ply as i32
+            } else {
+                -MATE_SCORE + ply as i32
+            }),
         }
     }
-
     fn evaluate_for_turn(&self, board: Board) -> i32 {
         let white_score = Self::evaluate_white_static(board);
         if board.turn == Team::White {
@@ -411,28 +508,25 @@ impl Engine {
         let white = board.state.pieces[0];
         let black = board.state.pieces[1];
         let kings = board.state.kings;
-
         let white_kings = white & kings;
         let black_kings = black & kings;
         let white_men = white & !kings;
         let black_men = black & !kings;
-
         let mut score = 0;
-
         score += white_men.count_ones() as i32 * 100;
         score -= black_men.count_ones() as i32 * 100;
         score += white_kings.count_ones() as i32 * 360;
         score -= black_kings.count_ones() as i32 * 360;
-
         score += Self::advancement_score(white_men, true);
         score -= Self::advancement_score(black_men, false);
 
+        let white_mobility = board.actions().len() as i32;
+        let black_mobility = board.swap_turn().actions().len() as i32;
+        score += (white_mobility - black_mobility) * 4;
         score += (white & CENTER_BOX).count_ones() as i32 * 8;
         score -= (black & CENTER_BOX).count_ones() as i32 * 8;
-
         score += (white_kings & CENTER_BOX).count_ones() as i32 * 6;
         score -= (black_kings & CENTER_BOX).count_ones() as i32 * 6;
-
         score
     }
 
@@ -442,9 +536,9 @@ impl Engine {
             let index = men.trailing_zeros() as i32;
             let row = index / 8;
             let advancement = if is_white { row } else { 7 - row };
-            score += advancement * 6;
+            score += advancement * 2;
             if advancement == 6 {
-                score += 28;
+                score += 10;
             }
             men &= men - 1;
         }
@@ -455,25 +549,22 @@ impl Engine {
         let destination = action.destination(board.turn, board.friendly_pieces());
         let col = destination.column() as i32;
         let row = destination.row() as i32;
-
         let central_bonus = match col {
-            3 | 4 => 10,
-            2 | 5 => 7,
-            1 | 6 => 3,
+            3 | 4 => 3,
+            2 | 5 => 2,
+            1 | 6 => 1,
             _ => 0,
         };
-
         let forward_progress = match board.turn {
             Team::White => row,
             Team::Black => 7 - row,
         };
-
         let mut bonus = central_bonus + forward_progress;
         if action.is_promotion(board.turn, &board.state) {
-            bonus += 100;
+            bonus += 20;
         }
         if action.is_capture(board.turn) {
-            bonus += 200 + action.capture_count(board.turn) as i32 * 40;
+            bonus += 30 + action.capture_count(board.turn) as i32 * 10;
         }
         bonus
     }
@@ -486,7 +577,6 @@ impl Engine {
 
     fn move_order_score(&self, board: Board, action: &Action, preferred: Option<Action>) -> i32 {
         let mut score = 0;
-
         if preferred == Some(*action) {
             score += 1_000_000;
         }
@@ -496,7 +586,6 @@ impl Engine {
         if action.is_promotion(board.turn, &board.state) {
             score += 50_000;
         }
-
         let destination = action.destination(board.turn, board.friendly_pieces());
         let col = destination.column() as i32;
         let row = destination.row() as i32;
@@ -517,11 +606,10 @@ impl Engine {
         let actions = board.actions();
         Self::is_forced_capture_actions(board, &actions)
     }
-
     fn is_forced_capture_actions(board: Board, actions: &[Action]) -> bool {
         actions
             .first()
-            .map(|action| action.is_capture(board.turn))
+            .map(|a| a.is_capture(board.turn))
             .unwrap_or(false)
     }
 
@@ -546,7 +634,6 @@ impl Engine {
             self.tt.insert(board, entry);
             return;
         }
-
         if let Some((victim_key, victim_entry)) = self
             .tt
             .iter()
@@ -556,6 +643,7 @@ impl Engine {
             if entry.depth >= victim_entry.depth || entry.age > victim_entry.age {
                 self.tt.remove(&victim_key);
                 self.tt.insert(board, entry);
+                self.tt_replacements += 1;
             }
         }
     }
@@ -567,7 +655,6 @@ impl Engine {
         }
         Ok(())
     }
-
     fn visit_qnode(&mut self) -> Result<(), SearchInterrupted> {
         self.qnodes += 1;
         if ((self.nodes + self.qnodes) & 2047) == 0 {
@@ -575,7 +662,6 @@ impl Engine {
         }
         Ok(())
     }
-
     fn ensure_running(&self) -> Result<(), SearchInterrupted> {
         if self.should_stop(None) {
             Err(SearchInterrupted)
