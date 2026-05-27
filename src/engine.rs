@@ -28,6 +28,12 @@ struct TTEntry {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct PlyHeuristics {
+    killer1: Option<Action>,
+    killer2: Option<Action>,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct EngineConfig {
     pub max_depth: Option<u32>,
     pub max_time: Option<Duration>,
@@ -93,6 +99,8 @@ pub struct Engine {
     tt: HashMap<Board, TTEntry>,
     cancel: Arc<AtomicBool>,
     generation: u64,
+    history: HashMap<Action, i32>,
+    ply_heuristics: Vec<PlyHeuristics>,
 }
 
 impl Engine {
@@ -108,6 +116,8 @@ impl Engine {
             tt: HashMap::with_capacity(config.tt_initial_capacity),
             cancel,
             generation: 0,
+            history: HashMap::new(),
+            ply_heuristics: Vec::with_capacity(96),
         }
     }
 
@@ -122,6 +132,8 @@ impl Engine {
         self.tt_hits = 0;
         self.cutoffs = 0;
         self.tt.clear();
+        self.history.clear();
+        self.ply_heuristics.clear();
 
         if self.root_board.actions().is_empty() {
             return None;
@@ -209,7 +221,7 @@ impl Engine {
         }
 
         let tt_move = self.tt.get(&board).and_then(|entry| entry.best_action);
-        self.order_moves(board, &mut actions, tt_move);
+        self.order_moves(board, &mut actions, tt_move, 0);
 
         let mut best_score = -INF;
         let mut best_tie_break = -INF;
@@ -288,7 +300,7 @@ impl Engine {
         if actions.is_empty() {
             return Ok(-MATE_SCORE + ply as i32);
         }
-        self.order_moves(board, &mut actions, tt_move);
+        self.order_moves(board, &mut actions, tt_move, ply);
 
         let mut best_score = -INF;
         let mut best_action: Option<Action> = None;
@@ -305,6 +317,7 @@ impl Engine {
                 alpha = score;
             }
             if alpha >= beta {
+                self.update_cutoff_heuristics(action, ply, depth);
                 self.cutoffs += 1;
                 break;
             }
@@ -355,7 +368,15 @@ impl Engine {
             return Ok(self.evaluate_for_turn(board));
         }
 
-        self.order_moves(board, &mut actions, None);
+        let stand_pat = self.evaluate_for_turn(board);
+        if stand_pat >= beta {
+            return Ok(beta);
+        }
+        if stand_pat > alpha {
+            alpha = stand_pat;
+        }
+
+        self.order_moves(board, &mut actions, None, ply);
         let mut best_score = -INF;
 
         for action in actions {
@@ -478,13 +499,25 @@ impl Engine {
         bonus
     }
 
-    fn order_moves(&self, board: Board, actions: &mut Vec<Action>, preferred: Option<Action>) {
+    fn order_moves(
+        &self,
+        board: Board,
+        actions: &mut Vec<Action>,
+        preferred: Option<Action>,
+        ply: u32,
+    ) {
         actions.sort_unstable_by_key(|action| {
-            Reverse(self.move_order_score(board, action, preferred))
+            Reverse(self.move_order_score(board, action, preferred, ply))
         });
     }
 
-    fn move_order_score(&self, board: Board, action: &Action, preferred: Option<Action>) -> i32 {
+    fn move_order_score(
+        &self,
+        board: Board,
+        action: &Action,
+        preferred: Option<Action>,
+        ply: u32,
+    ) -> i32 {
         let mut score = 0;
 
         if preferred == Some(*action) {
@@ -496,6 +529,19 @@ impl Engine {
         if action.is_promotion(board.turn, &board.state) {
             score += 50_000;
         }
+        if let Some(killers) = self.ply_heuristics.get(ply as usize).copied() {
+            if killers.killer1 == Some(*action) {
+                score += 40_000;
+            } else if killers.killer2 == Some(*action) {
+                score += 30_000;
+            }
+        }
+        score += self
+            .history
+            .get(action)
+            .copied()
+            .unwrap_or(0)
+            .clamp(0, 25_000);
 
         let destination = action.destination(board.turn, board.friendly_pieces());
         let col = destination.column() as i32;
@@ -511,6 +557,26 @@ impl Engine {
             Team::Black => 7 - row,
         };
         score
+    }
+
+    fn update_cutoff_heuristics(&mut self, action: Action, ply: u32, depth: u32) {
+        let ply_index = ply as usize;
+        while self.ply_heuristics.len() <= ply_index {
+            self.ply_heuristics.push(PlyHeuristics {
+                killer1: None,
+                killer2: None,
+            });
+        }
+        if !action.is_capture(Team::White) && !action.is_capture(Team::Black) {
+            let slot = &mut self.ply_heuristics[ply_index];
+            if slot.killer1 != Some(action) {
+                slot.killer2 = slot.killer1;
+                slot.killer1 = Some(action);
+            }
+            let bonus = ((depth as i32) * (depth as i32)).clamp(1, 10_000);
+            let entry = self.history.entry(action).or_insert(0);
+            *entry = (*entry + bonus).clamp(0, 50_000);
+        }
     }
 
     fn is_forced_capture_position(board: Board) -> bool {
