@@ -1,0 +1,52 @@
+# Rust
+/target/
+Cargo.lock
+.cargo/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Profiling
+callgrind.out*
+perf.data*
+flamegraph.svg
+cachegrind.out*
+massif.out*
+
+# Coverage
+*.profraw
+*.profdata
+lcov.info
+tarpaulin-report.html
+coverage/
+
+# Misc
+*.log
+*.bak

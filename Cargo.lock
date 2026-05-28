@@ -1073,8 +1073,6 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 [[package]]
 name = "kish"
 version = "1.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e89f9369b5db97de5ea1a03a6aa802440361b3b99eab635434d2050d097c37c3"
 dependencies = [
  "rayon",
  "rustc-hash",
