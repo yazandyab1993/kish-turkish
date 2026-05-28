@@ -182,6 +182,7 @@ pub struct DraughtsApp {
     analysis_use_nodes_limit: bool,
     analysis_max_depth: u32,
     analysis_max_nodes_millions: u64,
+    history_draw_rules_enabled: bool,
     opening_book_enabled: bool,
     opening_book: Option<OpeningBook>,
 
@@ -252,6 +253,7 @@ impl DraughtsApp {
             analysis_use_nodes_limit: false,
             analysis_max_depth: 16,
             analysis_max_nodes_millions: 20,
+            history_draw_rules_enabled: false,
             opening_book_enabled: true,
             opening_book,
             latest_report: None,
@@ -359,8 +361,16 @@ impl DraughtsApp {
         self.mode.human_controls(self.game.turn())
     }
 
+    fn current_status(&self) -> GameStatus {
+        if self.history_draw_rules_enabled {
+            self.game.status()
+        } else {
+            self.game.board().status()
+        }
+    }
+
     fn game_in_progress(&self) -> bool {
-        matches!(self.game.status(), GameStatus::InProgress)
+        matches!(self.current_status(), GameStatus::InProgress)
     }
 
     fn spawn_search(&mut self, ctx: &egui::Context, purpose: JobPurpose) {
@@ -598,7 +608,7 @@ impl DraughtsApp {
             format!("You played {notation}.")
         };
 
-        match self.game.status() {
+        match self.current_status() {
             GameStatus::InProgress => {}
             GameStatus::Draw => self.status_message = "Game over: draw.".to_owned(),
             GameStatus::Won(team) => {
@@ -797,6 +807,27 @@ impl DraughtsApp {
             egui::Slider::new(&mut self.max_nodes_millions, 1..=500).text("Nodes (million)"),
         );
         ui.checkbox(&mut self.analysis_enabled, "Live analysis");
+        if ui
+            .checkbox(
+                &mut self.history_draw_rules_enabled,
+                "Enable repetition/progress draw rules",
+            )
+            .changed()
+        {
+            self.status_message = if self.history_draw_rules_enabled {
+                "History draw rules enabled.".to_owned()
+            } else {
+                "History draw rules disabled; repetitions will not end the game.".to_owned()
+            };
+
+            match self.current_status() {
+                GameStatus::InProgress => {}
+                GameStatus::Draw => self.status_message = "Game over: draw.".to_owned(),
+                GameStatus::Won(team) => {
+                    self.status_message = format!("Game over: {team} wins.");
+                }
+            }
+        }
         ui.separator();
         ui.heading("Analysis Session Settings");
         ui.checkbox(
