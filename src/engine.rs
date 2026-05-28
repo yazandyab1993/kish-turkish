@@ -10,6 +10,10 @@ use std::time::{Duration, Instant};
 const INF: i32 = 2_000_000_000;
 const MATE_SCORE: i32 = 1_000_000;
 const CENTER_BOX: u64 = 0x0000_3C3C_3C3C_0000;
+const ENDGAME_PIECES_THRESHOLD: u32 = 4;
+const MOBILITY_WEIGHT: i32 = 5;
+const KING_EDGE_TRAP_WEIGHT: i32 = 12;
+const IMMEDIATE_CAPTURE_BONUS: i32 = 40;
 
 #[derive(Clone, Copy, Debug)]
 enum Bound {
@@ -433,6 +437,58 @@ impl Engine {
         score += (white_kings & CENTER_BOX).count_ones() as i32 * 6;
         score -= (black_kings & CENTER_BOX).count_ones() as i32 * 6;
 
+        let white_mobility = Self::team_mobility(board, Team::White);
+        let black_mobility = Self::team_mobility(board, Team::Black);
+        score += (white_mobility - black_mobility) * MOBILITY_WEIGHT;
+
+        if (white.count_ones() + black.count_ones()) <= ENDGAME_PIECES_THRESHOLD {
+            score += Self::king_edge_trap_score(black_kings);
+            score -= Self::king_edge_trap_score(white_kings);
+        }
+
+        if Self::has_immediate_capture(board, Team::White) {
+            score += IMMEDIATE_CAPTURE_BONUS;
+        }
+        if Self::has_immediate_capture(board, Team::Black) {
+            score -= IMMEDIATE_CAPTURE_BONUS;
+        }
+
+        score
+    }
+
+    fn team_mobility(board: Board, team: Team) -> i32 {
+        let board_for_team = if board.turn == team {
+            board
+        } else {
+            board.swap_turn()
+        };
+        board_for_team.actions().len() as i32
+    }
+
+    fn has_immediate_capture(board: Board, team: Team) -> bool {
+        let board_for_team = if board.turn == team {
+            board
+        } else {
+            board.swap_turn()
+        };
+        board_for_team
+            .actions()
+            .first()
+            .is_some_and(|action| action.is_capture(team))
+    }
+
+    fn king_edge_trap_score(mut kings: u64) -> i32 {
+        let mut score = 0;
+        while kings != 0 {
+            let index = kings.trailing_zeros() as i32;
+            let row = index / 8;
+            let col = index % 8;
+            let edge_distance = row.min(7 - row).min(col.min(7 - col));
+            if edge_distance <= 1 {
+                score += KING_EDGE_TRAP_WEIGHT;
+            }
+            kings &= kings - 1;
+        }
         score
     }
 
