@@ -1,0 +1,50 @@
+[workspace]
+members = ["kish-py"]
+resolver = "2"
+
+[package]
+name = "kish"
+version = "1.1.7"
+edition = "2021"
+authors = ["sanavesa"]
+description = "A high-performance Turkish Draughts (Dama) engine with bitboard representation"
+license = "Apache-2.0"
+repository = "https://github.com/Sanavesa/kish"
+documentation = "https://docs.rs/kish"
+readme = "README.md"
+keywords = ["checkers", "draughts", "dama", "turkish", "game"]
+categories = ["games", "game-development"]
+rust-version = "1.70"
+exclude = [
+    "callgrind.out",
+    "callgrind.out.profile",
+    "stats.txt",
+    ".vscode/",
+    ".claude/",
+    "docs/*.pdf",
+    "kish-py/",
+]
+
+[dependencies]
+rustc-hash = "2.1"
+rayon = "1.10"
+
+[dev-dependencies]
+criterion = "0.8"
+test-case = "3.3"
+
+[[bench]]
+name = "perft"
+harness = false
+
+[profile.release]
+debug = false
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+debug = false
+lto = true
+codegen-units = 1
+panic = "abort"
