@@ -881,17 +881,21 @@ impl DraughtsApp {
         ui.separator();
         ui.heading("Analysis");
         let static_eval = Engine::evaluate_white_static(*self.game.board());
+        let current_position_key = Engine::board_cache_key(*self.game.board());
 
-        let eval = self
-            .latest_report
-            .as_ref()
-            .map(|r| r.score_white)
-            .unwrap_or(static_eval);
+        let current_report = self.latest_report.as_ref().filter(|report| {
+            self.analyzed_position
+                .map(Engine::board_cache_key)
+                .is_some_and(|key| key == current_position_key)
+                && report.completed_depth > 0
+        });
+
+        let eval = current_report.map(|r| r.score_white).unwrap_or(static_eval);
 
         ui.label(egui::RichText::new("Engine evaluation (White perspective)").small());
         self.render_eval_bar(ui, eval);
 
-        if let Some(report) = &self.latest_report {
+        if let Some(report) = current_report {
             let kind = match self.latest_purpose {
                 Some(JobPurpose::EngineMove) => "Move search",
                 Some(JobPurpose::Analysis) => "Position analysis",
@@ -956,7 +960,7 @@ impl DraughtsApp {
                     });
             }
         } else {
-            ui.label("No completed engine analysis yet.");
+            ui.label("Static eval only (no completed search for current position yet).");
         }
 
         ui.add_space(5.0);
