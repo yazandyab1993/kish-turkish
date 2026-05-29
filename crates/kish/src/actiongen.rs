@@ -2372,22 +2372,22 @@ mod tests {
         assert!(!actions.is_empty(), "Should have moves available");
     }
 
-    // ========== DRAW CONDITION TESTS ==========
-    // Note: Most draw conditions are in board.rs status() tests
+    // ========== BARE 1V1 STATUS TESTS ==========
+    // Note: history/progress draw conditions are in game.rs status() tests
 
     #[test]
-    fn one_piece_each_is_draw() {
+    fn one_piece_each_stays_in_progress() {
         // One white piece vs one black piece
         let board = Board::from_squares(Team::White, &[Square::A1], &[Square::H8], &[]);
         assert_eq!(
             board.status(),
-            GameStatus::Draw,
-            "One piece each should be draw"
+            GameStatus::InProgress,
+            "One piece each should stay playable"
         );
     }
 
     #[test]
-    fn one_king_each_is_draw() {
+    fn one_king_each_stays_in_progress() {
         let board = Board::from_squares(
             Team::White,
             &[Square::A1],
@@ -2396,14 +2396,13 @@ mod tests {
         );
         assert_eq!(
             board.status(),
-            GameStatus::Draw,
-            "One king each should be draw"
+            GameStatus::InProgress,
+            "One king each should stay playable"
         );
     }
 
     #[test]
-    fn king_vs_pawn_is_draw() {
-        // Current implementation: 1 vs 1 is always draw regardless of type
+    fn king_vs_pawn_stays_in_progress() {
         let board = Board::from_squares(
             Team::White,
             &[Square::A1],
@@ -2412,8 +2411,8 @@ mod tests {
         );
         assert_eq!(
             board.status(),
-            GameStatus::Draw,
-            "King vs pawn (1v1) is draw in current implementation"
+            GameStatus::InProgress,
+            "King vs pawn (1v1) should stay playable"
         );
     }
 

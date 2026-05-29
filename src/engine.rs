@@ -662,3 +662,46 @@ impl Engine {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kish::Square;
+
+    #[test]
+    fn terminal_score_does_not_flatten_live_one_vs_one_capture_to_draw() {
+        let board = Board::from_squares(
+            Team::Black,
+            &[Square::B1],
+            &[Square::B7],
+            &[Square::B1, Square::B7],
+        );
+        let engine = Engine::new(
+            EngineConfig::with_limits(Some(1), None, None),
+            Arc::new(AtomicBool::new(false)),
+            board,
+        );
+
+        assert_eq!(board.status(), GameStatus::InProgress);
+        assert_eq!(engine.terminal_score(board, 0), None);
+
+        let white_to_move = board.swap_turn();
+        let winning_capture = white_to_move
+            .actions()
+            .into_iter()
+            .find(|action| {
+                action
+                    .to_detailed(Team::White, &white_to_move.state)
+                    .to_notation()
+                    == "b1xb8"
+            })
+            .expect("white should have a winning capture");
+        let after_capture = white_to_move.apply(&winning_capture).swap_turn();
+
+        assert_eq!(after_capture.status(), GameStatus::Won(Team::White));
+        assert_eq!(
+            engine.terminal_score(after_capture, 1),
+            Some(-MATE_SCORE + 1)
+        );
+    }
+}

@@ -209,11 +209,6 @@ impl Board {
             return GameStatus::Won(self.turn);
         }
 
-        // If both teams have a single piece, it is a draw
-        if friendly_pieces.is_power_of_two() && hostile_pieces.is_power_of_two() {
-            return GameStatus::Draw;
-        }
-
         // If friendlies have no actions, then hostiles have won
         if self.is_blocked() {
             return GameStatus::Won(self.turn.opponent());
@@ -224,7 +219,9 @@ impl Board {
             return GameStatus::Won(self.turn);
         }
 
-        // Otherwise, the game is in progress
+        // Otherwise, the game is in progress. Do not auto-draw bare 1v1
+        // positions: kings can still create forced captures in Turkish draughts,
+        // and history/progress draw rules are handled by `Game`.
         GameStatus::InProgress
     }
 
@@ -468,9 +465,9 @@ mod tests {
     }
 
     #[test]
-    fn status_draw() {
+    fn status_one_piece_each_stays_in_progress() {
         let board = Board::from_squares(Team::White, &[Square::A1], &[Square::B2], &[Square::A1]);
-        assert_eq!(board.status(), GameStatus::Draw);
+        assert_eq!(board.status(), GameStatus::InProgress);
     }
 
     #[test]

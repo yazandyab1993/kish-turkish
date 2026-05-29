@@ -1,5 +1,5 @@
 use crate::engine::{Engine, EngineConfig, SearchReport};
-use crate::opening_book::{self, OpeningBook, Side};
+use crate::opening_book::{self, MoveRecord, OpeningBook, Side};
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use kish::{Action, Board, Game, GameStatus, Square, Team};
 use std::collections::HashMap;
@@ -107,6 +107,7 @@ impl std::fmt::Display for BookLoadError {
 struct Diagnostics {
     book_hits: u64,
     book_misses: u64,
+    book_rejected: u64,
 }
 
 #[derive(Clone)]
@@ -281,11 +282,13 @@ impl DraughtsApp {
         serde_json::from_str::<OpeningBook>(&content).map_err(BookLoadError::Parse)
     }
 
-    fn try_opening_book_action(&self, board: Board) -> Option<Action> {
+    fn try_opening_book_action(&self, board: Board) -> Result<Option<Action>, ()> {
         if !self.opening_book_enabled {
-            return None;
+            return Ok(None);
         }
-        let book = self.opening_book.as_ref()?;
+        let Some(book) = self.opening_book.as_ref() else {
+            return Ok(None);
+        };
         let side = if board.turn == Team::White {
             Side::White
         } else {
@@ -294,31 +297,84 @@ impl DraughtsApp {
         let raw = format!("{}", board.state);
         let rows: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
         if rows.len() != 8 {
-            return None;
+            return Ok(None);
         }
 
         let mut converted = [['-'; 8]; 8];
         for (r, row) in rows.iter().enumerate() {
             let chars: Vec<char> = row.chars().filter(|ch| !ch.is_whitespace()).collect();
             if chars.len() != 8 {
-                return None;
+                return Ok(None);
             }
             for (c, ch) in chars.into_iter().enumerate() {
                 converted[r][c] = match ch {
                     'w' | 'W' | 'b' | 'B' | '-' => ch,
-                    _ => return None,
+                    _ => return Ok(None),
                 };
             }
         }
 
-        let rec = opening_book::get_book_move(book, &converted, side, "best")?;
-        let source = Self::square_from_name(&rec.from)?;
-        let target = Self::square_from_name(&rec.to)?;
+        let Some(rec) = opening_book::get_book_move(book, &converted, side, "best") else {
+            return Ok(None);
+        };
 
-        board.actions().into_iter().find(|action| {
-            action.source(board.turn, board.friendly_pieces()) == source
-                && action.destination(board.turn, board.friendly_pieces()) == target
-        })
+        let action = board
+            .actions()
+            .into_iter()
+            .find(|action| Self::book_record_matches_action(board, &rec, action));
+
+        let Some(action) = action else {
+            return Ok(None);
+        };
+
+        if Self::book_action_is_safe(board, &action) {
+            Ok(Some(action))
+        } else {
+            Err(())
+        }
+    }
+
+    fn book_record_matches_action(board: Board, rec: &MoveRecord, action: &Action) -> bool {
+        let Some(source) = Self::square_from_name(&rec.from) else {
+            return false;
+        };
+        let Some(target) = Self::square_from_name(&rec.to) else {
+            return false;
+        };
+
+        if action.source(board.turn, board.friendly_pieces()) != source
+            || action.destination(board.turn, board.friendly_pieces()) != target
+            || action.is_promotion(board.turn, &board.state) != rec.promotion
+        {
+            return false;
+        }
+
+        if rec.captures.is_empty() {
+            !action.is_capture(board.turn)
+        } else {
+            Self::capture_mask_from_names(&rec.captures)
+                .is_some_and(|captures| action.captured_pieces(board.turn) == captures)
+        }
+    }
+
+    fn capture_mask_from_names(names: &[String]) -> Option<u64> {
+        let mut mask = 0u64;
+        for name in names {
+            mask |= Self::square_from_name(name)?.to_mask();
+        }
+        Some(mask)
+    }
+
+    fn book_action_is_safe(board: Board, action: &Action) -> bool {
+        let after_book_move = board.apply(action).swap_turn();
+        let remaining_pieces = after_book_move.state.pieces[0].count_ones()
+            + after_book_move.state.pieces[1].count_ones();
+
+        remaining_pieces > 2
+            && !matches!(
+                after_book_move.status(),
+                GameStatus::Won(winner) if winner == board.turn.opponent()
+            )
     }
 
     fn square_from_name(name: &str) -> Option<Square> {
@@ -529,13 +585,20 @@ impl DraughtsApp {
         }
 
         if !self.is_human_turn() {
-            if let Some(action) = self.try_opening_book_action(*self.game.board()) {
-                self.diagnostics.book_hits += 1;
-                self.apply_move(action, true);
-                self.status_message = "Engine played from opening book.".to_owned();
-            } else {
-                self.diagnostics.book_misses += 1;
-                self.spawn_search(ctx, JobPurpose::EngineMove);
+            match self.try_opening_book_action(*self.game.board()) {
+                Ok(Some(action)) => {
+                    self.diagnostics.book_hits += 1;
+                    self.apply_move(action, true);
+                    self.status_message = "Engine played from opening book.".to_owned();
+                }
+                Ok(None) => {
+                    self.diagnostics.book_misses += 1;
+                    self.spawn_search(ctx, JobPurpose::EngineMove);
+                }
+                Err(()) => {
+                    self.diagnostics.book_rejected += 1;
+                    self.spawn_search(ctx, JobPurpose::EngineMove);
+                }
             }
         } else if self.analysis_enabled && self.analyzed_position != Some(*self.game.board()) {
             let cache_key = Engine::board_cache_key(*self.game.board());
@@ -951,9 +1014,10 @@ impl DraughtsApp {
             ));
             ui.label(format!("Cutoffs: {}", format_number(report.cutoffs)));
             ui.label(format!(
-                "Book hits: {}  |  Book misses: {}",
+                "Book hits: {}  |  Misses: {}  |  Rejected: {}",
                 format_number(self.diagnostics.book_hits),
-                format_number(self.diagnostics.book_misses)
+                format_number(self.diagnostics.book_misses),
+                format_number(self.diagnostics.book_rejected)
             ));
             ui.add_space(5.0);
             ui.label(egui::RichText::new("Principal variation").strong());

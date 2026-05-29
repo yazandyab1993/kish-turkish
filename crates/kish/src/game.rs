@@ -184,12 +184,11 @@ impl Game {
     /// This checks:
     /// 1. Win by capturing all pieces
     /// 2. Win by blocking the opponent
-    /// 3. Draw by 1v1 (Rule 9.3)
-    /// 4. Draw by threefold repetition (Rule 9.2)
-    /// 5. Draw by insufficient progress (Rule 9.4) - 150 plies without capture
+    /// 3. Draw by threefold repetition (Rule 9.2)
+    /// 4. Draw by insufficient progress (Rule 9.4) - 150 plies without capture
     #[must_use]
     pub fn status(&self) -> GameStatus {
-        // First check basic status (win/loss/1v1 draw)
+        // First check basic status (win/loss/blocking)
         let basic_status = self.board.status();
         if basic_status != GameStatus::InProgress {
             return basic_status;
@@ -553,10 +552,9 @@ mod tests {
 
     #[test]
     fn status_checks_all_conditions() {
-        // Test 1v1 draw takes priority
         let board = Board::from_squares(Team::White, &[Square::A1], &[Square::H8], &[]);
         let game = Game::from_board(board);
-        assert_eq!(game.status(), GameStatus::Draw);
+        assert_eq!(game.status(), GameStatus::InProgress);
     }
 
     #[test]

@@ -17,7 +17,7 @@ fn threefold_repetition_is_draw() {
     // Two kings on opposite corners, neither can capture the other
     let board = Board::from_squares(
         Team::White,
-        &[Square::A1, Square::B1], // Two white pieces to avoid 1v1 draw
+        &[Square::A1, Square::B1], // Two white pieces to avoid early material simplification
         &[Square::H8, Square::G8], // Two black pieces
         &[Square::A1, Square::B1, Square::H8, Square::G8], // All are kings
     );
@@ -147,22 +147,24 @@ fn threefold_repetition_non_consecutive() {
 
 // =============================================================================
 // 9.3 One Piece Each
+//
+// Bare 1v1 positions are not an automatic board-level draw in this engine.
+// They remain playable so forced king-capture tactics can be resolved by search;
+// repetition and insufficient-progress draws are handled by `Game` history.
 // =============================================================================
 
-/// Rule 9.3: One piece each is draw (pawn vs pawn)
 #[test]
-fn one_pawn_each_is_draw() {
-    let board = Board::from_squares(Team::White, &[Square::A1], &[Square::H8], &[]);
+fn one_pawn_each_stays_in_progress() {
+    let board = Board::from_squares(Team::White, &[Square::A2], &[Square::H7], &[]);
     assert_eq!(
         board.status(),
-        GameStatus::Draw,
-        "One pawn each should be draw"
+        GameStatus::InProgress,
+        "One pawn each should stay playable until a real terminal or history draw"
     );
 }
 
-/// Rule 9.3: One piece each is draw (king vs king)
 #[test]
-fn one_king_each_is_draw() {
+fn one_king_each_stays_in_progress() {
     let board = Board::from_squares(
         Team::White,
         &[Square::A1],
@@ -171,14 +173,13 @@ fn one_king_each_is_draw() {
     );
     assert_eq!(
         board.status(),
-        GameStatus::Draw,
-        "One king each should be draw"
+        GameStatus::InProgress,
+        "One king each should stay playable because king tactics may still exist"
     );
 }
 
-/// Rule 9.3: One piece each is draw (king vs pawn)
 #[test]
-fn one_king_vs_one_pawn_is_draw() {
+fn one_king_vs_one_pawn_stays_in_progress() {
     let board = Board::from_squares(
         Team::White,
         &[Square::D4],
@@ -187,8 +188,8 @@ fn one_king_vs_one_pawn_is_draw() {
     );
     assert_eq!(
         board.status(),
-        GameStatus::Draw,
-        "King vs pawn (1v1) should be draw"
+        GameStatus::InProgress,
+        "King vs pawn (1v1) should stay playable"
     );
 }
 
@@ -200,25 +201,55 @@ fn two_vs_one_is_not_draw() {
     assert_ne!(board.status(), GameStatus::Draw, "2v1 should not be draw");
 }
 
-/// Rule 9.3: Exactly one piece each - edge case verification
 #[test]
-fn one_piece_each_draw_regardless_of_position() {
-    // Test various positions with 1v1
+fn one_piece_each_without_immediate_capture_stays_in_progress() {
     let test_cases = [
         (Square::A1, Square::H8),
         (Square::D4, Square::E5),
-        (Square::A8, Square::H1),
-        (Square::D1, Square::D8),
+        (Square::B2, Square::G7),
+        (Square::D2, Square::D7),
     ];
 
     for (white_pos, black_pos) in test_cases {
         let board = Board::from_squares(Team::White, &[white_pos], &[black_pos], &[]);
         assert_eq!(
             board.status(),
-            GameStatus::Draw,
-            "1v1 at {white_pos:?} vs {black_pos:?} should be draw"
+            GameStatus::InProgress,
+            "1v1 at {white_pos:?} vs {black_pos:?} should stay playable"
         );
     }
+}
+
+/// Bare 1v1 handling must not hide a live capture tactic.
+#[test]
+fn one_king_each_with_immediate_capture_stays_in_progress() {
+    let board = Board::from_squares(
+        Team::Black,
+        &[Square::B1],
+        &[Square::B7],
+        &[Square::B1, Square::B7],
+    );
+
+    assert_eq!(
+        board.status(),
+        GameStatus::InProgress,
+        "1v1 should continue when the side to move can be captured next"
+    );
+
+    let white_to_move = board.swap_turn();
+    let winning_capture = white_to_move
+        .actions()
+        .into_iter()
+        .find(|action| {
+            action
+                .to_detailed(Team::White, &white_to_move.state)
+                .to_notation()
+                == "b1xb8"
+        })
+        .expect("white king should be able to capture on b8");
+    let after_capture = white_to_move.apply(&winning_capture).swap_turn();
+
+    assert_eq!(after_capture.status(), GameStatus::Won(Team::White));
 }
 
 // =============================================================================
@@ -300,10 +331,9 @@ fn mutual_block_is_draw() {
 /// Test that Game.status() includes all draw conditions
 #[test]
 fn game_status_includes_all_draw_conditions() {
-    // 1v1 draw via Board
     let board = Board::from_squares(Team::White, &[Square::A1], &[Square::H8], &[]);
     let game = Game::from_board(board);
-    assert_eq!(game.status(), GameStatus::Draw);
+    assert_eq!(game.status(), GameStatus::InProgress);
 
     // Insufficient progress draw via Game
     let board = Board::from_squares(
